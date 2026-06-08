@@ -1,0 +1,1955 @@
+﻿"use client";
+
+import { useEffect, useMemo, useState } from "react";
+import { useMutation, useQuery } from "@tanstack/react-query";
+import { Loader2, RefreshCcw, Save } from "lucide-react";
+import Link from "next/link";
+import { toast } from "sonner";
+import { deepMerge, HttpError, ocrApi } from "@/lib/ocrApi";
+import type { OcrPreprocessConfig, PipelineConfig, QwenVlConfig, SupportLabelsConfig } from "@/types/ocr-api";
+import { QwenVlForm } from "@/components/semantic/qwen-vl-form";
+import { SupportLabelsForm } from "@/components/semantic/support-labels-form";
+import { TagsInput } from "@/components/semantic/tags-input";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
+import { Textarea } from "@/components/ui/textarea";
+
+const defaultSupportLabels: SupportLabelsConfig = {
+  enabled: true,
+  label: "etiquetas",
+  max_support_crops: 2,
+  min_primary_products: 1,
+  min_low_confidence_ratio: 0.6,
+  memory_enabled: true,
+  memory_ocr_enabled: true,
+  memory_labels: ["etiquetas", "productos"],
+  max_memory_crops: 3,
+  memory_ocr_prompt: "Extrae todo el texto de la imagen.",
+  debug_text_limit: 280,
+  assist_primary_name_enabled: true,
+  assist_only_when_low_confidence: true,
+  assist_min_similarity: 0.5,
+  assist_semantic_repair_enabled: true,
+  assist_semantic_repair_only: false,
+};
+
+const defaultQwenVl: QwenVlConfig = {
+  model: "qwen3-vl:8b",
+  prompt_file: "qwen3vl_prompt.txt",
+  enabled_sources: ["primary"],
+  timeout_sec: 90,
+  max_retries: 1,
+  retry_delay_sec: 3,
+};
+
+const defaultOcrPreprocess: OcrPreprocessConfig = {
+  enabled: true,
+  variants: ["original", "enhanced", "adaptive_threshold"],
+  shadow_variants: [],
+  ensemble_enabled: true,
+  shadow_enabled: false,
+  shadow_ocr_enabled: false,
+  select_best: true,
+  store_artifacts: true,
+  contrast_alpha: 1.32,
+  contrast_beta: 8,
+  sharpen_strength: 1.0,
+  adaptive_block_size: 29,
+  adaptive_c: 6,
+  jpeg_quality: 100,
+};
+
+const OCR_VARIANT_OPTIONS = ["original", "enhanced", "adaptive_threshold"] as const;
+
+const OCR_PREPROCESS_PRESETS: Array<{ id: string; name: string; config: OcrPreprocessConfig }> = [
+  {
+    id: "balanced_default",
+    name: "Balanceado",
+    config: {
+      enabled: true,
+      variants: ["original", "enhanced", "adaptive_threshold"],
+      select_best: true,
+      store_artifacts: true,
+      contrast_alpha: 1.28,
+      contrast_beta: 6,
+      sharpen_strength: 0.9,
+      adaptive_block_size: 31,
+      adaptive_c: 7,
+      jpeg_quality: 100,
+    },
+  },
+  {
+    id: "text_thin_aggressive",
+    name: "Texto Fino Agresivo",
+    config: {
+      enabled: true,
+      variants: ["original", "enhanced", "adaptive_threshold"],
+      select_best: true,
+      store_artifacts: true,
+      contrast_alpha: 1.4,
+      contrast_beta: 10,
+      sharpen_strength: 1.2,
+      adaptive_block_size: 25,
+      adaptive_c: 5,
+      jpeg_quality: 100,
+    },
+  },
+  {
+    id: "safe_low_noise",
+    name: "Seguro Bajo Ruido",
+    config: {
+      enabled: true,
+      variants: ["original", "enhanced"],
+      select_best: true,
+      store_artifacts: true,
+      contrast_alpha: 1.18,
+      contrast_beta: 4,
+      sharpen_strength: 0.6,
+      adaptive_block_size: 33,
+      adaptive_c: 8,
+      jpeg_quality: 100,
+    },
+  },
+  {
+    id: "off_original_only",
+    name: "Solo Original",
+    config: {
+      enabled: false,
+      variants: ["original"],
+      select_best: false,
+      store_artifacts: false,
+      contrast_alpha: 1.0,
+      contrast_beta: 0,
+      sharpen_strength: 0.0,
+      adaptive_block_size: 31,
+      adaptive_c: 7,
+      jpeg_quality: 95,
+    },
+  },
+];
+
+function parseLocaleNumber(raw: string, fallback: number): number {
+  const normalized = raw.replace(",", ".").trim();
+  const value = Number(normalized);
+  return Number.isFinite(value) ? value : fallback;
+}
+
+function safeStringify(value: unknown): string {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return "";
+  }
+}
+
+function prettyJson(value: unknown): string {
+  try {
+    return JSON.stringify(value ?? {}, null, 2);
+  } catch {
+    return "{}";
+  }
+}
+
+function toStringList(value: unknown): string[] {
+  return Array.isArray(value) ? value.map((x) => String(x)).filter(Boolean) : [];
+}
+
+function getDetectorValidationSummary(source?: Record<string, unknown> | null): { ready: boolean; warnings: string[]; errors: string[]; labels: string[] } {
+  const warnings = toStringList(source?.warnings);
+  const errors = toStringList(source?.errors);
+  const readiness = source?.readiness && typeof source.readiness === "object" ? (source.readiness as Record<string, unknown>) : null;
+  const ready =
+    typeof source?.ready === "boolean"
+      ? source.ready
+      : typeof readiness?.ready === "boolean"
+        ? (readiness.ready as boolean)
+        : errors.length === 0;
+  const modelLoad = readiness?.model_load && typeof readiness.model_load === "object"
+    ? (readiness.model_load as Record<string, unknown>)
+    : source?.model_load && typeof source.model_load === "object"
+      ? (source.model_load as Record<string, unknown>)
+      : null;
+  const labels = toStringList(modelLoad?.labels);
+  return { ready, warnings, errors, labels };
+}
+
+function normalizeQwenVl(config: PipelineConfig): PipelineConfig {
+  const qwen = (config.qwen_vl ?? {}) as Record<string, unknown>;
+  const model = typeof qwen.model === "string" ? qwen.model.trim() : "";
+  const promptFile = typeof qwen.prompt_file === "string" ? qwen.prompt_file.trim() : "";
+  const enabledSources = Array.isArray(qwen.enabled_sources)
+    ? qwen.enabled_sources.map((x) => (typeof x === "string" ? x.trim() : "")).filter(Boolean)
+    : [];
+
+  return {
+    ...config,
+    qwen_vl: {
+      ...qwen,
+      model: model || "qwen3-vl:8b",
+      prompt_file: promptFile || "qwen3vl_prompt.txt",
+      enabled_sources: enabledSources.length ? enabledSources : ["primary"],
+    },
+  };
+}
+
+function normalizeOcrPreprocess(config: PipelineConfig): PipelineConfig {
+  const source = (config.ocr_preprocess ?? {}) as Record<string, unknown>;
+  const rawVariants = Array.isArray(source.variants) ? source.variants : defaultOcrPreprocess.variants;
+  const rawShadowVariants = Array.isArray(source.shadow_variants) ? source.shadow_variants : defaultOcrPreprocess.shadow_variants;
+  const normalizedVariants = (rawVariants ?? [])
+    .map((x) => (typeof x === "string" ? x.trim() : ""))
+    .filter(Boolean)
+    .filter((x) => x === "original" || x === "enhanced" || x === "adaptive_threshold");
+  const normalizedShadowVariants = (rawShadowVariants ?? [])
+    .map((x) => (typeof x === "string" ? x.trim() : ""))
+    .filter(Boolean)
+    .filter((x) => x === "original" || x === "enhanced" || x === "adaptive_threshold");
+  const odd = (n: number, fallback: number) => {
+    const value = Number.isFinite(n) ? n : fallback;
+    const clamped = Math.min(51, Math.max(15, Math.round(value)));
+    return clamped % 2 === 0 ? clamped + 1 : clamped;
+  };
+  return {
+    ...config,
+    ocr_preprocess: {
+      ...source,
+      enabled: typeof source.enabled === "boolean" ? source.enabled : defaultOcrPreprocess.enabled,
+      variants: normalizedVariants.length ? normalizedVariants : defaultOcrPreprocess.variants,
+      shadow_variants: normalizedShadowVariants,
+      ensemble_enabled: typeof source.ensemble_enabled === "boolean" ? source.ensemble_enabled : defaultOcrPreprocess.ensemble_enabled,
+      shadow_enabled: typeof source.shadow_enabled === "boolean" ? source.shadow_enabled : defaultOcrPreprocess.shadow_enabled,
+      shadow_ocr_enabled: typeof source.shadow_ocr_enabled === "boolean" ? source.shadow_ocr_enabled : defaultOcrPreprocess.shadow_ocr_enabled,
+      select_best: typeof source.select_best === "boolean" ? source.select_best : defaultOcrPreprocess.select_best,
+      store_artifacts: typeof source.store_artifacts === "boolean" ? source.store_artifacts : defaultOcrPreprocess.store_artifacts,
+      contrast_alpha: Number.isFinite(Number(source.contrast_alpha)) ? Number(source.contrast_alpha) : defaultOcrPreprocess.contrast_alpha,
+      contrast_beta: Number.isFinite(Number(source.contrast_beta)) ? Number(source.contrast_beta) : defaultOcrPreprocess.contrast_beta,
+      sharpen_strength: Number.isFinite(Number(source.sharpen_strength)) ? Number(source.sharpen_strength) : defaultOcrPreprocess.sharpen_strength,
+      adaptive_block_size: odd(Number(source.adaptive_block_size), defaultOcrPreprocess.adaptive_block_size ?? 29),
+      adaptive_c: Number.isFinite(Number(source.adaptive_c)) ? Number(source.adaptive_c) : defaultOcrPreprocess.adaptive_c,
+      jpeg_quality: Number.isFinite(Number(source.jpeg_quality)) ? Number(source.jpeg_quality) : defaultOcrPreprocess.jpeg_quality,
+    },
+  };
+}
+
+function normalizeTextEnrichment(config: PipelineConfig): PipelineConfig {
+  const text = (config.text_enrichment ?? {}) as Record<string, unknown>;
+  const semanticRag =
+    text.semantic_rag && typeof text.semantic_rag === "object"
+      ? (text.semantic_rag as Record<string, unknown>)
+      : {};
+  const semanticScope =
+    text.semantic_scope_guardrails && typeof text.semantic_scope_guardrails === "object"
+      ? (text.semantic_scope_guardrails as Record<string, unknown>)
+      : {};
+
+  return {
+    ...config,
+    text_enrichment: {
+      ...text,
+      enabled: text.enabled !== false,
+      semantic_rag: {
+        ...semanticRag,
+        enabled: semanticRag.enabled !== false,
+        limit: Number.isFinite(Number(semanticRag.limit)) ? Number(semanticRag.limit) : 8,
+        rollout_mode:
+          typeof semanticRag.rollout_mode === "string" && semanticRag.rollout_mode.trim()
+            ? semanticRag.rollout_mode
+            : "apply",
+      },
+      semantic_scope_guardrails: {
+        ...semanticScope,
+        enabled: semanticScope.enabled !== false,
+      },
+    },
+  };
+}
+
+function readTextEnrichmentExplicit(config?: PipelineConfig): {
+  enabled: boolean;
+  semanticRagEnabled: boolean;
+  semanticScopeEnabled: boolean;
+} {
+  const text = (config?.text_enrichment ?? {}) as Record<string, unknown>;
+  const semanticRag =
+    text.semantic_rag && typeof text.semantic_rag === "object"
+      ? (text.semantic_rag as Record<string, unknown>)
+      : null;
+  const semanticScope =
+    text.semantic_scope_guardrails && typeof text.semantic_scope_guardrails === "object"
+      ? (text.semantic_scope_guardrails as Record<string, unknown>)
+      : null;
+
+  return {
+    enabled: Object.prototype.hasOwnProperty.call(text, "enabled"),
+    semanticRagEnabled: semanticRag ? Object.prototype.hasOwnProperty.call(semanticRag, "enabled") : false,
+    semanticScopeEnabled: semanticScope ? Object.prototype.hasOwnProperty.call(semanticScope, "enabled") : false,
+  };
+}
+
+function validateQwenVl(config: PipelineConfig): string[] {
+  const qwen = (config.qwen_vl ?? {}) as Record<string, unknown>;
+  const errors: string[] = [];
+  const model = typeof qwen.model === "string" ? qwen.model.trim() : "";
+  const promptFile = typeof qwen.prompt_file === "string" ? qwen.prompt_file.trim() : "";
+  const enabledSources = Array.isArray(qwen.enabled_sources)
+    ? qwen.enabled_sources.map((x) => (typeof x === "string" ? x.trim() : "")).filter(Boolean)
+    : [];
+  const timeoutSec = typeof qwen.timeout_sec === "number" ? qwen.timeout_sec : Number(qwen.timeout_sec ?? 0);
+  const maxRetries = typeof qwen.max_retries === "number" ? qwen.max_retries : Number(qwen.max_retries ?? 0);
+  const retryDelay = typeof qwen.retry_delay_sec === "number" ? qwen.retry_delay_sec : Number(qwen.retry_delay_sec ?? 0);
+
+  if (!model) errors.push("qwen_vl.model es obligatorio.");
+  if ("prompt_file" in qwen && !promptFile) errors.push("qwen_vl.prompt_file no puede estar vacío.");
+  if (!enabledSources.length) errors.push("qwen_vl.enabled_sources debe tener al menos una fuente.");
+  if (enabledSources.some((s) => s !== "primary" && s !== "support")) errors.push("qwen_vl.enabled_sources solo permite primary/support.");
+  if (!Number.isFinite(timeoutSec) || timeoutSec < 5 || timeoutSec > 1800) errors.push("qwen_vl.timeout_sec debe estar entre 5 y 1800.");
+  if (!Number.isFinite(maxRetries) || maxRetries < 1 || maxRetries > 5) errors.push("qwen_vl.max_retries debe estar entre 1 y 5.");
+  if (!Number.isFinite(retryDelay) || retryDelay < 0 || retryDelay > 120) errors.push("qwen_vl.retry_delay_sec debe estar entre 0 y 120.");
+  return errors;
+}
+
+type AccountConfigPageProps = {
+  account: string;
+};
+
+export function AccountConfigPage({ account }: AccountConfigPageProps) {
+  const [accountName, setAccountName] = useState(account);
+  const [configName, setConfigName] = useState("default");
+  const [workingConfig, setWorkingConfig] = useState<PipelineConfig>({});
+  const [version, setVersion] = useState("vX");
+  const [showPayloadDebug, setShowPayloadDebug] = useState(false);
+  const [detectorValidation, setDetectorValidation] = useState<Record<string, unknown> | null>(null);
+  const [textEnrichmentExplicit, setTextEnrichmentExplicit] = useState({
+    enabled: false,
+    semanticRagEnabled: false,
+    semanticScopeEnabled: false,
+  });
+  const [barcodeSettingsText, setBarcodeSettingsText] = useState("{}");
+  const [chainBarcodeRulesText, setChainBarcodeRulesText] = useState("{}");
+  const [barcodeCorrectionText, setBarcodeCorrectionText] = useState("{}");
+  const [keywordFiltersText, setKeywordFiltersText] = useState("{}");
+  const [productDedupeText, setProductDedupeText] = useState("{}");
+
+  const activeQuery = useQuery({
+    queryKey: ["semantic-active-config", accountName, configName],
+    queryFn: () => ocrApi.getActiveConfig(accountName, configName),
+    retry: false,
+  });
+
+  const listQuery = useQuery({
+    queryKey: ["semantic-config-list", accountName, configName],
+    queryFn: () => ocrApi.listConfigs(accountName, configName),
+  });
+
+  const detectorModelsQuery = useQuery({
+    queryKey: ["detector-local-models"],
+    queryFn: () => ocrApi.getDetectorLocalModels(),
+    staleTime: 120_000,
+  });
+
+  const detectorStatusQuery = useQuery({
+    queryKey: ["detector-status", accountName, configName],
+    queryFn: () => ocrApi.getDetectorStatus(accountName, configName, false),
+    enabled: Boolean(accountName && configName),
+  });
+
+  const llmRoutingQuery = useQuery({
+    queryKey: ["account-llm-routing", accountName, configName],
+    queryFn: () => ocrApi.getAccountLlmRouting(accountName, configName),
+    enabled: Boolean(accountName && configName),
+  });
+
+  useEffect(() => {
+    if (activeQuery.data) {
+      const raw = (activeQuery.data.config ?? {}) as PipelineConfig;
+      setWorkingConfig(normalizeTextEnrichment(raw));
+      setTextEnrichmentExplicit(readTextEnrichmentExplicit(raw));
+      setBarcodeSettingsText(prettyJson((raw as Record<string, unknown>).barcode_settings));
+      setChainBarcodeRulesText(prettyJson((raw as Record<string, unknown>).chain_barcode_rules));
+      setBarcodeCorrectionText(prettyJson((raw as Record<string, unknown>).barcode_correction));
+      setKeywordFiltersText(prettyJson((raw as Record<string, unknown>).keyword_filters));
+      setProductDedupeText(prettyJson((((raw.text_enrichment ?? {}) as Record<string, unknown>).product_dedupe)));
+      setVersion("vX");
+      return;
+    }
+
+    if (activeQuery.error instanceof HttpError && activeQuery.error.status === 404) {
+      setWorkingConfig({
+        support_labels: defaultSupportLabels,
+        qwen_vl: defaultQwenVl,
+        detection_config: { mode: "roboflow_api", min_confidence: 0.4 },
+        text_enrichment: {
+          enabled: true,
+          semantic_rag: { enabled: true, limit: 8, rollout_mode: "apply" },
+          normalization_map: {},
+          semantic_scope_guardrails: { enabled: true },
+        },
+      });
+      setTextEnrichmentExplicit({
+        enabled: true,
+        semanticRagEnabled: true,
+        semanticScopeEnabled: true,
+      });
+      setBarcodeSettingsText("{}");
+      setChainBarcodeRulesText("{}");
+      setBarcodeCorrectionText("{}");
+      setKeywordFiltersText("{}");
+      setProductDedupeText("{}");
+      setVersion("vX");
+    }
+  }, [activeQuery.data, activeQuery.error]);
+
+  const detectionConfig = (workingConfig.detection_config ?? {}) as Record<string, unknown>;
+  const textEnrichment = (workingConfig.text_enrichment ?? {}) as Record<string, unknown>;
+  const supportLabels = useMemo(() => {
+    const source = (workingConfig.support_labels ?? {}) as Partial<SupportLabelsConfig>;
+    return {
+      enabled: source.enabled ?? defaultSupportLabels.enabled,
+      label: source.label ?? defaultSupportLabels.label,
+      max_support_crops: source.max_support_crops ?? defaultSupportLabels.max_support_crops,
+      min_primary_products: source.min_primary_products ?? defaultSupportLabels.min_primary_products,
+      min_low_confidence_ratio: source.min_low_confidence_ratio ?? defaultSupportLabels.min_low_confidence_ratio,
+      memory_enabled: source.memory_enabled ?? defaultSupportLabels.memory_enabled,
+      memory_ocr_enabled: source.memory_ocr_enabled ?? defaultSupportLabels.memory_ocr_enabled,
+      memory_labels: source.memory_labels ?? defaultSupportLabels.memory_labels,
+      max_memory_crops: source.max_memory_crops ?? defaultSupportLabels.max_memory_crops,
+      memory_ocr_prompt: source.memory_ocr_prompt ?? defaultSupportLabels.memory_ocr_prompt,
+      debug_text_limit: source.debug_text_limit ?? defaultSupportLabels.debug_text_limit,
+      assist_primary_name_enabled: source.assist_primary_name_enabled ?? defaultSupportLabels.assist_primary_name_enabled,
+      assist_only_when_low_confidence: source.assist_only_when_low_confidence ?? defaultSupportLabels.assist_only_when_low_confidence,
+      assist_min_similarity: source.assist_min_similarity ?? defaultSupportLabels.assist_min_similarity,
+      assist_semantic_repair_enabled: source.assist_semantic_repair_enabled ?? defaultSupportLabels.assist_semantic_repair_enabled,
+      assist_semantic_repair_only: source.assist_semantic_repair_only ?? defaultSupportLabels.assist_semantic_repair_only,
+    } satisfies SupportLabelsConfig;
+  }, [workingConfig.support_labels]);
+
+  const qwenVl = useMemo(() => {
+    const source = (workingConfig.qwen_vl ?? {}) as QwenVlConfig;
+    return {
+      model: source.model ?? defaultQwenVl.model,
+      prompt_file: source.prompt_file ?? defaultQwenVl.prompt_file,
+      enabled_sources: source.enabled_sources ?? defaultQwenVl.enabled_sources,
+      timeout_sec: source.timeout_sec ?? defaultQwenVl.timeout_sec,
+      max_retries: source.max_retries ?? defaultQwenVl.max_retries,
+      retry_delay_sec: source.retry_delay_sec ?? defaultQwenVl.retry_delay_sec,
+    } satisfies QwenVlConfig;
+  }, [workingConfig.qwen_vl]);
+
+  const ocrPreprocess = useMemo(() => {
+    const source = (workingConfig.ocr_preprocess ?? {}) as OcrPreprocessConfig;
+    return {
+      enabled: source.enabled ?? defaultOcrPreprocess.enabled,
+      variants: source.variants ?? defaultOcrPreprocess.variants,
+      shadow_variants: source.shadow_variants ?? defaultOcrPreprocess.shadow_variants,
+      ensemble_enabled: source.ensemble_enabled ?? defaultOcrPreprocess.ensemble_enabled,
+      shadow_enabled: source.shadow_enabled ?? defaultOcrPreprocess.shadow_enabled,
+      shadow_ocr_enabled: source.shadow_ocr_enabled ?? defaultOcrPreprocess.shadow_ocr_enabled,
+      select_best: source.select_best ?? defaultOcrPreprocess.select_best,
+      store_artifacts: source.store_artifacts ?? defaultOcrPreprocess.store_artifacts,
+      contrast_alpha: source.contrast_alpha ?? defaultOcrPreprocess.contrast_alpha,
+      contrast_beta: source.contrast_beta ?? defaultOcrPreprocess.contrast_beta,
+      sharpen_strength: source.sharpen_strength ?? defaultOcrPreprocess.sharpen_strength,
+      adaptive_block_size: source.adaptive_block_size ?? defaultOcrPreprocess.adaptive_block_size,
+      adaptive_c: source.adaptive_c ?? defaultOcrPreprocess.adaptive_c,
+      jpeg_quality: source.jpeg_quality ?? defaultOcrPreprocess.jpeg_quality,
+    } satisfies OcrPreprocessConfig;
+  }, [workingConfig.ocr_preprocess]);
+
+  const saveMutation = useMutation({
+    mutationFn: async () => {
+      let base: Record<string, unknown> = {};
+      try {
+        const latestActive = await ocrApi.getActiveConfig(accountName, configName);
+        base = (latestActive?.config ?? {}) as Record<string, unknown>;
+      } catch (error) {
+        if (!(error instanceof HttpError) || error.status !== 404) throw error;
+      }
+      const merged = deepMerge(base, workingConfig as Record<string, unknown>);
+      const normalized = normalizeTextEnrichment(normalizeOcrPreprocess(normalizeQwenVl(merged as PipelineConfig)));
+      const validationErrors = validateQwenVl(normalized);
+      if (validationErrors.length) {
+        throw new Error(validationErrors.join(" "));
+      }
+      const saved = await ocrApi.upsertConfig(accountName, {
+        name: configName,
+        version: version || "next",
+        is_active: true,
+        config: normalized,
+      });
+      if (saved?.id !== undefined && saved?.id !== null) {
+        await ocrApi.activateConfig(accountName, saved.id);
+      }
+      const post = await ocrApi.getDetectorStatus(accountName, configName, true);
+      const postSummary = getDetectorValidationSummary(post as Record<string, unknown>);
+      if (!postSummary.ready) {
+        throw new Error(`Config guardada, pero detector no está listo: ${(postSummary.errors ?? []).join(" | ") || "sin detalle"}`);
+      }
+      return saved;
+    },
+    onSuccess: (saved) => {
+      toast.success("Config guardada");
+      if (saved?.id !== undefined && saved?.id !== null) {
+        toast.success(`Config activa: ${saved.name}/${saved.version}`);
+      }
+      activeQuery.refetch();
+      listQuery.refetch();
+      detectorStatusQuery.refetch();
+    },
+    onError: (error) => {
+      const description =
+        error instanceof HttpError
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : "Error inesperado";
+      toast.error("No se pudo guardar config", { description });
+      console.error("save-config-error", error);
+    },
+  });
+
+  const validateDetectorMutation = useMutation({
+    mutationFn: (checkModelLoad: boolean) =>
+      ocrApi.validateDetectorConfig(accountName, {
+        config_name: configName,
+        check_model_load: checkModelLoad,
+        detection_config: (workingConfig.detection_config ?? {}) as Record<string, unknown>,
+      }),
+    onSuccess: (res, checkModelLoad) => {
+      setDetectorValidation((res && typeof res === "object" ? res : {}) as Record<string, unknown>);
+      if (res.ready) {
+        toast.success(checkModelLoad ? "Modelo local cargado correctamente" : "Detector válido");
+      } else {
+        toast.warning("Detector con observaciones", { description: (res.warnings ?? res.errors ?? []).join(" | ") || "Revisar configuración" });
+      }
+      detectorStatusQuery.refetch();
+    },
+    onError: (error) => {
+      toast.error("No se pudo validar detector", {
+        description: error instanceof Error ? error.message : "Error inesperado",
+      });
+    },
+  });
+
+  const active404 = activeQuery.error instanceof HttpError && activeQuery.error.status === 404;
+  const debugPayload = useMemo(() => {
+    const base = (activeQuery.data?.config ?? {}) as Record<string, unknown>;
+    const merged = deepMerge(base, workingConfig as Record<string, unknown>);
+    const normalized = normalizeTextEnrichment(normalizeOcrPreprocess(normalizeQwenVl(merged as PipelineConfig)));
+    return {
+      name: configName,
+      version: version || "vX",
+      is_active: true,
+      config: normalized,
+    };
+  }, [activeQuery.data?.config, configName, version, workingConfig]);
+  const activeNormalizedConfig = useMemo(
+    () =>
+      activeQuery.data?.config
+        ? normalizeTextEnrichment(normalizeOcrPreprocess(normalizeQwenVl((activeQuery.data.config ?? {}) as PipelineConfig)))
+        : null,
+    [activeQuery.data?.config],
+  );
+  const hasUnsavedChanges = useMemo(() => {
+    if (!activeNormalizedConfig) return true;
+    return safeStringify(activeNormalizedConfig) !== safeStringify(debugPayload.config);
+  }, [activeNormalizedConfig, debugPayload.config]);
+
+  const detectorMode = String((detectionConfig.mode as string) ?? "roboflow_api");
+  const localModelPath = String((detectionConfig.local_model_path as string) ?? "models/best.pt");
+  const detectorLocalModels = detectorModelsQuery.data?.models ?? [];
+  const detectorRecommendedCustomPath = detectorModelsQuery.data?.recommended_custom_path ?? "";
+  const selectedLocalModelKnown = detectorLocalModels.some((model) => model.path === localModelPath || model.absolute_path === localModelPath);
+  const detectorRoboflow = ((detectionConfig.roboflow as Record<string, unknown> | undefined) ?? {}) as Record<string, unknown>;
+  const detectorRoboflowWorkspace = String((detectorRoboflow.workspace as string) ?? "");
+  const detectorRoboflowProject = String((detectorRoboflow.project as string) ?? "");
+  const detectorRoboflowVersion = Number(detectorRoboflow.version ?? 1) || 1;
+  const detectorRoboflowApiKey = String((detectorRoboflow.api_key as string) ?? "");
+  const detectorFilters = ((detectionConfig.filters as Record<string, unknown> | undefined) ?? {}) as Record<string, unknown>;
+  const detectorAllowedLabels = Array.isArray(detectorFilters.allowed_labels)
+    ? (detectorFilters.allowed_labels as unknown[]).map((x) => String(x))
+    : Array.isArray(detectionConfig.allowed_labels)
+      ? (detectionConfig.allowed_labels as unknown[]).map((x) => String(x))
+      : ["promociones"];
+  const detectorIgnoredLabels = Array.isArray(detectorFilters.ignored_labels)
+    ? (detectorFilters.ignored_labels as unknown[]).map((x) => String(x))
+    : Array.isArray(detectionConfig.ignored_labels)
+      ? (detectionConfig.ignored_labels as unknown[]).map((x) => String(x))
+      : ["etiquetas", "persona", "carrito", "percha", "producto", "productos"];
+  const detectorMinConfidence = Number(
+    detectorFilters.min_confidence ?? detectionConfig.min_confidence ?? 0.4,
+  );
+  const detectorLabelSuggestions = ["promociones", "etiquetas", "productos", "producto", "persona", "carrito", "percha"];
+  const detectorIgnoredDefaultSuggestions = ["etiquetas", "persona", "carrito", "percha", "producto", "productos"];
+  const detectorValidationSummary = getDetectorValidationSummary(detectorValidation ?? (detectorStatusQuery.data as Record<string, unknown> | undefined) ?? null);
+  const detectorSemaforoClass = detectorValidationSummary.errors.length
+    ? "border-rose-300/40 bg-rose-500/10 text-rose-100"
+    : detectorValidationSummary.warnings.length
+      ? "border-amber-300/40 bg-amber-500/10 text-amber-100"
+      : "border-emerald-300/40 bg-emerald-500/10 text-emerald-100";
+  const isLocalMissingPath = detectorMode === "local" && !localModelPath.trim();
+  const shouldBlockSaveDetector = detectorValidationSummary.errors.length > 0 || isLocalMissingPath;
+  const measureNoiseChains = Array.isArray((((textEnrichment.measure_noise_rules as Record<string, unknown> | undefined) ?? {}).chains))
+    ? ((((textEnrichment.measure_noise_rules as Record<string, unknown>).chains as unknown[]) ?? []).map((item) => String(item)))
+    : ["mi comisariato", "hypermarket", "hipermarket", "el rosado"];
+  const measureNoiseChainSuggestions = ["mi comisariato", "hypermarket", "hipermarket", "el rosado", "supermaxi", "aki", "gran aki"];
+  const promotionCatalogMemory = (((textEnrichment.promotion_catalog_memory as Record<string, unknown> | undefined) ?? {}) as Record<string, unknown>);
+  const promotionCatalogAllowFieldFill = Array.isArray(promotionCatalogMemory.allow_field_fill)
+    ? (promotionCatalogMemory.allow_field_fill as unknown[]).map((item) => String(item)).filter(Boolean)
+    : ["marca", "tamano", "variante"];
+  const promotionCatalogAuditOnlyFields = Array.isArray(promotionCatalogMemory.audit_only_fields)
+    ? (promotionCatalogMemory.audit_only_fields as unknown[]).map((item) => String(item)).filter(Boolean)
+    : ["fabricante", "categoria"];
+  const jobDefaults = (((workingConfig.job_defaults ?? {}) as Record<string, unknown>) ?? {}) as Record<string, unknown>;
+  const glmOcr = (((workingConfig.glm_ocr ?? {}) as Record<string, unknown>) ?? {}) as Record<string, unknown>;
+  const primaryAreaFilter = (((detectionConfig.primary_area_filter ?? {}) as Record<string, unknown>) ?? {}) as Record<string, unknown>;
+  const semanticRerank = ((((workingConfig.ocr_preprocess ?? {}) as Record<string, unknown>).semantic_rerank as Record<string, unknown> | undefined) ?? {}) as Record<string, unknown>;
+
+  function applyAdvancedJsonConfig(label: string, raw: string, updater: (parsed: Record<string, unknown>) => void) {
+    try {
+      const parsed = JSON.parse(raw || "{}");
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error("Debes ingresar un objeto JSON.");
+      }
+      updater(parsed as Record<string, unknown>);
+      toast.success(`${label} actualizado en el borrador`);
+    } catch (error) {
+      toast.error(`No se pudo aplicar ${label}`, {
+        description: error instanceof Error ? error.message : "JSON invalido",
+      });
+    }
+  }
+
+  return (
+    <div className="space-y-6">
+      <Card className="border-white/10 bg-white/5 backdrop-blur">
+        <CardHeader>
+          <CardTitle>Configuración OCR por cuenta</CardTitle>
+          <CardDescription>Promociones primero, etiquetas como soporte secundario cuando la salida primaria es débil.</CardDescription>
+        </CardHeader>
+        <CardContent className="grid gap-4 md:grid-cols-3">
+          <div className="space-y-2"><Label>account_name</Label><Input value={accountName} onChange={(e) => setAccountName(e.target.value)} /></div>
+          <div className="space-y-2"><Label>config_name</Label><Input value={configName} onChange={(e) => setConfigName(e.target.value)} /></div>
+          <div className="flex items-end"><Button variant="outline" onClick={() => { activeQuery.refetch(); listQuery.refetch(); }}><RefreshCcw className="mr-2 h-4 w-4" />Recargar</Button></div>
+          <div className="md:col-span-3">
+            <div className="mb-3 rounded-lg border border-cyan-300/20 bg-cyan-500/10 p-3 text-xs">
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge variant="outline">Activa: {activeQuery.data?.name ?? configName} / {activeQuery.data?.version ?? "-"}</Badge>
+                <Badge className={hasUnsavedChanges ? "border-amber-300/40 bg-amber-500/10 text-amber-100" : "border-emerald-300/40 bg-emerald-500/10 text-emerald-100"}>
+                  {hasUnsavedChanges ? "Borrador con cambios sin guardar" : "Sin cambios pendientes"}
+                </Badge>
+                <Badge className="border-cyan-300/40 bg-cyan-500/10 text-cyan-100">Chip azul = valor del borrador actual</Badge>
+              </div>
+              <p className="mt-2 text-slate-200/90">
+                Los cambios se aplican al backend solo cuando presionas <strong>Guardar config</strong>.
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => {
+                  if (activeQuery.data?.config) {
+                    const raw = (activeQuery.data.config ?? {}) as PipelineConfig;
+                    setWorkingConfig(normalizeTextEnrichment(raw));
+                    setTextEnrichmentExplicit(readTextEnrichmentExplicit(raw));
+                    setBarcodeSettingsText(prettyJson((raw as Record<string, unknown>).barcode_settings));
+                    setChainBarcodeRulesText(prettyJson((raw as Record<string, unknown>).chain_barcode_rules));
+                    setBarcodeCorrectionText(prettyJson((raw as Record<string, unknown>).barcode_correction));
+                    setKeywordFiltersText(prettyJson((raw as Record<string, unknown>).keyword_filters));
+                    setProductDedupeText(prettyJson((((raw.text_enrichment ?? {}) as Record<string, unknown>).product_dedupe)));
+                    toast.success("Formulario recargado con la configuración activa");
+                  } else {
+                    toast.warning("No hay configuración activa para cargar");
+                  }
+                }}
+              >
+                Cargar config activa en formulario
+              </Button>
+              <Link href={`/accounts/${encodeURIComponent(accountName)}/aliases`} className="rounded-md border border-cyan-300/30 bg-cyan-500/10 px-3 py-2 text-sm font-medium text-cyan-100 transition hover:bg-cyan-500/20">
+                Gestionar aliases semánticos
+              </Link>
+              <Link href={`/accounts/${encodeURIComponent(accountName)}/semantic-knowledge`} className="rounded-md border border-emerald-300/30 bg-emerald-500/10 px-3 py-2 text-sm font-medium text-emerald-100 transition hover:bg-emerald-500/20">
+                Memoria semántica (RAG)
+              </Link>
+              <Link href={`/accounts/${encodeURIComponent(accountName)}/playground`} className="rounded-md border border-white/15 bg-white/5 px-3 py-2 text-sm text-slate-100 transition hover:bg-white/10">
+                Probar en Playground
+              </Link>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      {active404 ? <Card className="border-amber-400/30 bg-amber-500/10"><CardContent className="py-4 text-sm">Sin configuración activa. Puedes crear una base y guardarla.</CardContent></Card> : null}
+
+      <Card className="border-white/10 bg-white/5 backdrop-blur">
+        <CardHeader>
+          <CardTitle>Resumen de runtime</CardTitle>
+          <CardDescription>Estos bloques suelen explicar por qué una corrida salió distinta aunque el detector y Qwen estén bien.</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid gap-4 md:grid-cols-3">
+            <div className="rounded-lg border border-white/10 bg-black/20 p-3">
+              <p className="text-xs text-slate-400">skip_qwen</p>
+              <p className="mt-1 text-lg font-semibold text-white">{String(Boolean(jobDefaults.skip_qwen))}</p>
+            </div>
+            <div className="rounded-lg border border-white/10 bg-black/20 p-3">
+              <p className="text-xs text-slate-400">cadena por default</p>
+              <p className="mt-1 text-lg font-semibold text-white">{typeof jobDefaults.cadena === "string" && jobDefaults.cadena ? String(jobDefaults.cadena) : "-"}</p>
+            </div>
+            <div className="rounded-lg border border-white/10 bg-black/20 p-3">
+              <p className="text-xs text-slate-400">export_excel</p>
+              <p className="mt-1 text-lg font-semibold text-white">{String(Boolean(jobDefaults.export_excel))}</p>
+            </div>
+          </div>
+
+          <div className="grid gap-4 md:grid-cols-3">
+            <div className="space-y-2">
+              <Label>job_defaults.skip_qwen</Label>
+              <div className="flex items-center justify-between rounded-lg border border-white/10 p-3">
+                <p className="text-xs text-muted-foreground">Permite forzar una corrida sin ayuda visual Qwen.</p>
+                <Switch
+                  checked={Boolean(jobDefaults.skip_qwen)}
+                  onCheckedChange={(checked) =>
+                    setWorkingConfig((prev) => ({
+                      ...prev,
+                      job_defaults: { ...(((prev.job_defaults ?? {}) as Record<string, unknown>) ?? {}), skip_qwen: checked },
+                    }))
+                  }
+                />
+              </div>
+            </div>
+            <div className="space-y-2">
+              <Label>job_defaults.cadena</Label>
+              <Input
+                value={typeof jobDefaults.cadena === "string" ? String(jobDefaults.cadena) : ""}
+                onChange={(e) =>
+                  setWorkingConfig((prev) => ({
+                    ...prev,
+                    job_defaults: { ...(((prev.job_defaults ?? {}) as Record<string, unknown>) ?? {}), cadena: e.target.value },
+                  }))
+                }
+                placeholder="rosado"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>job_defaults.export_excel</Label>
+              <div className="flex items-center justify-between rounded-lg border border-white/10 p-3">
+                <p className="text-xs text-muted-foreground">Activa exportable de resultados cuando el flujo lo soporte.</p>
+                <Switch
+                  checked={Boolean(jobDefaults.export_excel)}
+                  onCheckedChange={(checked) =>
+                    setWorkingConfig((prev) => ({
+                      ...prev,
+                      job_defaults: { ...(((prev.job_defaults ?? {}) as Record<string, unknown>) ?? {}), export_excel: checked },
+                    }))
+                  }
+                />
+              </div>
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-cyan-300/20 bg-cyan-500/10 p-3">
+            <p className="text-sm font-medium text-cyan-100">llm_routing actual</p>
+            <p className="mt-1 text-xs text-slate-300">Se consulta por ruta dedicada. Hoy se expone para visibilidad, aunque el runtime legacy pueda seguir mandando en algunos caminos.</p>
+            <pre className="mt-3 max-h-52 overflow-auto text-xs text-slate-200">{JSON.stringify(llmRoutingQuery.data?.llm_routing ?? {}, null, 2)}</pre>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card className="border-white/10 bg-white/5 backdrop-blur">
+        <CardHeader>
+          <CardTitle>GLM OCR</CardTitle>
+          <CardDescription>Este es el OCR principal de Ollama. Si aquí hay valores raros, el resto de la pipeline puede verse bien y aun así leer peor.</CardDescription>
+        </CardHeader>
+        <CardContent className="grid gap-4 md:grid-cols-4">
+          <div className="space-y-2">
+            <Label>glm_ocr.model</Label>
+            <Input
+              value={typeof glmOcr.model === "string" ? String(glmOcr.model) : "glm-ocr"}
+              onChange={(e) => setWorkingConfig((prev) => ({ ...prev, glm_ocr: { ...(((prev.glm_ocr ?? {}) as Record<string, unknown>) ?? {}), model: e.target.value } }))}
+            />
+          </div>
+          <div className="space-y-2">
+            <Label>glm_ocr.num_ctx</Label>
+            <Input
+              type="number"
+              value={Number(glmOcr.num_ctx ?? 2048) || 2048}
+              onChange={(e) => setWorkingConfig((prev) => ({ ...prev, glm_ocr: { ...(((prev.glm_ocr ?? {}) as Record<string, unknown>) ?? {}), num_ctx: Number(e.target.value || 2048) } }))}
+            />
+          </div>
+          <div className="space-y-2">
+            <Label>glm_ocr.num_predict</Label>
+            <Input
+              type="number"
+              value={Number(glmOcr.num_predict ?? 768) || 768}
+              onChange={(e) => setWorkingConfig((prev) => ({ ...prev, glm_ocr: { ...(((prev.glm_ocr ?? {}) as Record<string, unknown>) ?? {}), num_predict: Number(e.target.value || 768) } }))}
+            />
+          </div>
+          <div className="space-y-2">
+            <Label>glm_ocr.temperature</Label>
+            <Input
+              type="number"
+              step="0.1"
+              value={Number(glmOcr.temperature ?? 0) || 0}
+              onChange={(e) => setWorkingConfig((prev) => ({ ...prev, glm_ocr: { ...(((prev.glm_ocr ?? {}) as Record<string, unknown>) ?? {}), temperature: parseLocaleNumber(e.target.value, 0) } }))}
+            />
+          </div>
+          <div className="space-y-2 md:col-span-2">
+            <Label>glm_ocr.keep_alive</Label>
+            <Input
+              value={typeof glmOcr.keep_alive === "string" ? String(glmOcr.keep_alive) : "10m"}
+              onChange={(e) => setWorkingConfig((prev) => ({ ...prev, glm_ocr: { ...(((prev.glm_ocr ?? {}) as Record<string, unknown>) ?? {}), keep_alive: e.target.value } }))}
+            />
+          </div>
+        </CardContent>
+      </Card>
+
+      <SupportLabelsForm
+        value={supportLabels}
+        onChange={(next) => setWorkingConfig((prev) => ({ ...prev, support_labels: next }))}
+      />
+
+      <QwenVlForm
+        value={qwenVl}
+        onChange={(next) => setWorkingConfig((prev) => ({ ...prev, qwen_vl: next }))}
+      />
+
+      <Card className="border-white/10 bg-white/5 backdrop-blur">
+        <CardHeader>
+          <CardTitle>OCR Preprocess (A/B por crop)</CardTitle>
+          <CardDescription>Ajusta variantes de imagen para mejorar lectura OCR en letras finas.</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex flex-wrap gap-2">
+            {OCR_PREPROCESS_PRESETS.map((preset) => (
+              <Button
+                key={preset.id}
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={() => setWorkingConfig((prev) => ({ ...prev, ocr_preprocess: preset.config }))}
+              >
+                {preset.name}
+              </Button>
+            ))}
+          </div>
+          <div className="grid gap-4 md:grid-cols-2">
+            <div className="flex items-center justify-between rounded-lg border border-white/10 p-3">
+              <div>
+                <p className="text-sm font-medium">enabled</p>
+                <p className="text-xs text-muted-foreground">Activa preprocess OCR por crop.</p>
+              </div>
+              <Switch checked={Boolean(ocrPreprocess.enabled)} onCheckedChange={(checked) => setWorkingConfig((prev) => ({ ...prev, ocr_preprocess: { ...(prev.ocr_preprocess ?? {}), enabled: checked } }))} />
+            </div>
+            <div className="flex items-center justify-between rounded-lg border border-white/10 p-3">
+              <div>
+                <p className="text-sm font-medium">select_best</p>
+                <p className="text-xs text-muted-foreground">Selecciona automáticamente la mejor variante.</p>
+              </div>
+              <Switch checked={Boolean(ocrPreprocess.select_best)} onCheckedChange={(checked) => setWorkingConfig((prev) => ({ ...prev, ocr_preprocess: { ...(prev.ocr_preprocess ?? {}), select_best: checked } }))} />
+            </div>
+            <div className="flex items-center justify-between rounded-lg border border-white/10 p-3 md:col-span-2">
+              <div>
+                <p className="text-sm font-medium">store_artifacts</p>
+                <p className="text-xs text-muted-foreground">Guarda imágenes por variante para evidencia visual.</p>
+              </div>
+              <Switch checked={Boolean(ocrPreprocess.store_artifacts)} onCheckedChange={(checked) => setWorkingConfig((prev) => ({ ...prev, ocr_preprocess: { ...(prev.ocr_preprocess ?? {}), store_artifacts: checked } }))} />
+            </div>
+            <div className="flex items-center justify-between rounded-lg border border-white/10 p-3">
+              <div>
+                <p className="text-sm font-medium">ensemble_enabled</p>
+                <p className="text-xs text-muted-foreground">Permite combinar heurísticas para escoger o reordenar la mejor variante.</p>
+              </div>
+              <Switch checked={Boolean(ocrPreprocess.ensemble_enabled)} onCheckedChange={(checked) => setWorkingConfig((prev) => ({ ...prev, ocr_preprocess: { ...(prev.ocr_preprocess ?? {}), ensemble_enabled: checked } }))} />
+            </div>
+            <div className="flex items-center justify-between rounded-lg border border-white/10 p-3">
+              <div>
+                <p className="text-sm font-medium">shadow_enabled</p>
+                <p className="text-xs text-muted-foreground">Evalúa variantes shadow como auditoría, sin reemplazar el resultado final.</p>
+              </div>
+              <Switch checked={Boolean(ocrPreprocess.shadow_enabled)} onCheckedChange={(checked) => setWorkingConfig((prev) => ({ ...prev, ocr_preprocess: { ...(prev.ocr_preprocess ?? {}), shadow_enabled: checked } }))} />
+            </div>
+            <div className="flex items-center justify-between rounded-lg border border-white/10 p-3 md:col-span-2">
+              <div>
+                <p className="text-sm font-medium">shadow_ocr_enabled</p>
+                <p className="text-xs text-muted-foreground">Hace OCR también sobre las variantes shadow para comparar score, chars y preview textual.</p>
+              </div>
+              <Switch checked={Boolean(ocrPreprocess.shadow_ocr_enabled)} onCheckedChange={(checked) => setWorkingConfig((prev) => ({ ...prev, ocr_preprocess: { ...(prev.ocr_preprocess ?? {}), shadow_ocr_enabled: checked } }))} />
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-white/10 p-3 space-y-3">
+            <div>
+              <p className="text-sm font-medium">variants activas</p>
+              <p className="text-xs text-muted-foreground">Estas variantes sí pueden ganar y alimentar el OCR final del crop.</p>
+            </div>
+            <div className="grid gap-3 md:grid-cols-3">
+              {OCR_VARIANT_OPTIONS.map((variant) => {
+                const enabled = (ocrPreprocess.variants ?? []).includes(variant);
+                return (
+                  <div key={variant} className="flex items-center justify-between rounded-md border border-white/10 p-3">
+                    <span className="text-sm">{variant}</span>
+                    <Switch
+                      checked={enabled}
+                      onCheckedChange={(checked) => {
+                        const set = new Set(ocrPreprocess.variants ?? []);
+                        if (checked) set.add(variant);
+                        else set.delete(variant);
+                        const next = Array.from(set);
+                        setWorkingConfig((prev) => ({ ...prev, ocr_preprocess: { ...(prev.ocr_preprocess ?? {}), variants: next.length ? next : ["original"] } }));
+                      }}
+                    />
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-amber-300/20 bg-amber-500/5 p-3 space-y-3">
+            <div>
+              <p className="text-sm font-medium">shadow_variants</p>
+              <p className="text-xs text-muted-foreground">Estas variantes apoyan como auditoría. Hoy sirven para comparar y detectar oportunidades, pero no reemplazan el texto final.</p>
+            </div>
+            <div className="grid gap-3 md:grid-cols-3">
+              {OCR_VARIANT_OPTIONS.map((variant) => {
+                const enabled = (ocrPreprocess.shadow_variants ?? []).includes(variant);
+                return (
+                  <div key={`shadow-${variant}`} className="flex items-center justify-between rounded-md border border-white/10 p-3">
+                    <span className="text-sm">{variant}</span>
+                    <Switch
+                      checked={enabled}
+                      onCheckedChange={(checked) => {
+                        const set = new Set(ocrPreprocess.shadow_variants ?? []);
+                        if (checked) set.add(variant);
+                        else set.delete(variant);
+                        setWorkingConfig((prev) => ({ ...prev, ocr_preprocess: { ...(prev.ocr_preprocess ?? {}), shadow_variants: Array.from(set) } }));
+                      }}
+                    />
+                  </div>
+                );
+              })}
+            </div>
+            <div className="rounded-md border border-white/10 bg-black/20 p-3 text-xs text-slate-300">
+              <p><strong>Uso recomendado:</strong> deja en activas las variantes que confías para producción, y manda a shadow las que quieres observar sin que cambien el resultado.</p>
+            </div>
+          </div>
+
+          <div className="grid gap-4 md:grid-cols-3">
+            <div className="space-y-2"><Label>contrast_alpha (1.0-1.6)</Label><Input type="number" min={1} max={1.6} step="0.01" value={ocrPreprocess.contrast_alpha ?? 1.32} onChange={(e) => setWorkingConfig((prev) => ({ ...prev, ocr_preprocess: { ...(prev.ocr_preprocess ?? {}), contrast_alpha: Number(e.target.value || 1.32) } }))} /></div>
+            <div className="space-y-2"><Label>contrast_beta (0-20)</Label><Input type="number" min={0} max={20} step="1" value={ocrPreprocess.contrast_beta ?? 8} onChange={(e) => setWorkingConfig((prev) => ({ ...prev, ocr_preprocess: { ...(prev.ocr_preprocess ?? {}), contrast_beta: Number(e.target.value || 0) } }))} /></div>
+            <div className="space-y-2"><Label>sharpen_strength (0-2.0)</Label><Input type="number" min={0} max={2} step="0.1" value={ocrPreprocess.sharpen_strength ?? 1} onChange={(e) => setWorkingConfig((prev) => ({ ...prev, ocr_preprocess: { ...(prev.ocr_preprocess ?? {}), sharpen_strength: Number(e.target.value || 0) } }))} /></div>
+            <div className="space-y-2"><Label>adaptive_block_size (impar 15-51)</Label><Input type="number" min={15} max={51} step="2" value={ocrPreprocess.adaptive_block_size ?? 29} onChange={(e) => setWorkingConfig((prev) => ({ ...prev, ocr_preprocess: { ...(prev.ocr_preprocess ?? {}), adaptive_block_size: Number(e.target.value || 29) } }))} /></div>
+            <div className="space-y-2"><Label>adaptive_c (1-15)</Label><Input type="number" min={1} max={15} step="1" value={ocrPreprocess.adaptive_c ?? 6} onChange={(e) => setWorkingConfig((prev) => ({ ...prev, ocr_preprocess: { ...(prev.ocr_preprocess ?? {}), adaptive_c: Number(e.target.value || 6) } }))} /></div>
+            <div className="space-y-2"><Label>jpeg_quality</Label><Input type="number" min={80} max={100} step="1" value={ocrPreprocess.jpeg_quality ?? 100} onChange={(e) => setWorkingConfig((prev) => ({ ...prev, ocr_preprocess: { ...(prev.ocr_preprocess ?? {}), jpeg_quality: Number(e.target.value || 100) } }))} /></div>
+          </div>
+
+          <div className="rounded-lg border border-white/10 p-4">
+            <div className="mb-4 flex items-center justify-between">
+              <div>
+                <p className="text-sm font-medium">ocr_preprocess.semantic_rerank</p>
+                <p className="text-xs text-muted-foreground">Reordena variantes cuando el ruido semántico indica que la lectura puede mejorar.</p>
+              </div>
+              <Switch
+                checked={Boolean(semanticRerank.enabled)}
+                onCheckedChange={(checked) =>
+                  setWorkingConfig((prev) => ({
+                    ...prev,
+                    ocr_preprocess: {
+                      ...(prev.ocr_preprocess ?? {}),
+                      semantic_rerank: {
+                        ...((((prev.ocr_preprocess ?? {}) as Record<string, unknown>).semantic_rerank as Record<string, unknown>) ?? {}),
+                        enabled: checked,
+                      },
+                    },
+                  }))
+                }
+              />
+            </div>
+            <div className="grid gap-4 md:grid-cols-2">
+              <div className="space-y-2">
+                <Label>semantic_rerank.trigger_delta</Label>
+                <Input
+                  type="number"
+                  step="0.1"
+                  value={Number(semanticRerank.trigger_delta ?? 0.4) || 0.4}
+                  onChange={(e) =>
+                    setWorkingConfig((prev) => ({
+                      ...prev,
+                      ocr_preprocess: {
+                        ...(prev.ocr_preprocess ?? {}),
+                        semantic_rerank: {
+                          ...((((prev.ocr_preprocess ?? {}) as Record<string, unknown>).semantic_rerank as Record<string, unknown>) ?? {}),
+                          trigger_delta: parseLocaleNumber(e.target.value, 0.4),
+                        },
+                      },
+                    }))
+                  }
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>semantic_rerank.min_noise_penalty_to_trigger</Label>
+                <Input
+                  type="number"
+                  step="0.1"
+                  value={Number(semanticRerank.min_noise_penalty_to_trigger ?? 0.8) || 0.8}
+                  onChange={(e) =>
+                    setWorkingConfig((prev) => ({
+                      ...prev,
+                      ocr_preprocess: {
+                        ...(prev.ocr_preprocess ?? {}),
+                        semantic_rerank: {
+                          ...((((prev.ocr_preprocess ?? {}) as Record<string, unknown>).semantic_rerank as Record<string, unknown>) ?? {}),
+                          min_noise_penalty_to_trigger: parseLocaleNumber(e.target.value, 0.8),
+                        },
+                      },
+                    }))
+                  }
+                />
+              </div>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card className="border-white/10 bg-white/5 backdrop-blur">
+        <CardHeader>
+          <CardTitle>Detector (Roboflow / YOLO local)</CardTitle>
+          <CardDescription>Roboflow sigue como principal y YOLO local queda listo para activarse cuando tengas tu modelo custom .pt.</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge className={detectorSemaforoClass}>
+              {detectorValidationSummary.errors.length ? "rojo" : detectorValidationSummary.warnings.length ? "amarillo" : "verde"}
+            </Badge>
+            <Badge variant={detectorValidationSummary.ready ? "default" : "secondary"}>
+              {detectorValidationSummary.ready ? "ready" : "not ready"}
+            </Badge>
+            {(detectorValidationSummary.warnings ?? []).slice(0, 2).map((warning, idx) => (
+              <Badge key={`${warning}-${idx}`} variant="outline">{warning}</Badge>
+            ))}
+            {(detectorValidationSummary.errors ?? []).slice(0, 1).map((error, idx) => (
+              <Badge key={`${error}-${idx}`} className="border-rose-300/40 bg-rose-500/10 text-rose-100">{error}</Badge>
+            ))}
+          </div>
+
+          {detectorValidationSummary.labels.length ? (
+            <div className="rounded-lg border border-white/10 bg-black/20 p-3 text-xs">
+              <p className="mb-1 text-muted-foreground">readiness.model_load.labels</p>
+              <div className="flex flex-wrap gap-2">
+                {detectorValidationSummary.labels.map((label) => <Badge key={label} variant="outline">{label}</Badge>)}
+              </div>
+            </div>
+          ) : null}
+
+          <div className="grid gap-4 md:grid-cols-2">
+            <div className="space-y-2">
+              <Label>mode</Label>
+              <select
+                className="h-10 w-full rounded-md border border-white/15 bg-black/30 px-3 text-sm"
+                value={detectorMode}
+                onChange={(e) =>
+                  setWorkingConfig((prev) => ({
+                    ...prev,
+                    detection_config: { ...(prev.detection_config ?? {}), mode: e.target.value },
+                  }))
+                }
+              >
+                <option value="roboflow_api">roboflow_api</option>
+                <option value="local">local</option>
+              </select>
+            </div>
+            <div className="space-y-2">
+              <Label>local_model_path</Label>
+              <select
+                className="h-10 w-full rounded-md border border-white/15 bg-black/30 px-3 text-sm"
+                value={selectedLocalModelKnown ? localModelPath : "__custom__"}
+                onChange={(e) => {
+                  const next = e.target.value;
+                  if (next === "__custom__") return;
+                  setWorkingConfig((prev) => ({
+                    ...prev,
+                    detection_config: { ...(prev.detection_config ?? {}), local_model_path: next },
+                  }));
+                }}
+              >
+                <option value="__custom__">{detectorLocalModels.length ? "Ruta personalizada / escribir manualmente" : "No se detectaron modelos locales"}</option>
+                {detectorLocalModels.map((model) => {
+                  const label = [model.filename || model.path, model.size_bytes ? `${Math.max(1, Math.round(model.size_bytes / 1024 / 1024))} MB` : ""].filter(Boolean).join(" · ");
+                  const value = model.path || model.absolute_path || "";
+                  return <option key={`detector-model-${value}`} value={value}>{label}</option>;
+                })}
+              </select>
+              <Input
+                className="h-10 w-full rounded-md border border-white/15 bg-black/30 px-3 text-sm"
+                value={localModelPath}
+                onChange={(e) =>
+                  setWorkingConfig((prev) => ({
+                    ...prev,
+                    detection_config: { ...(prev.detection_config ?? {}), local_model_path: e.target.value },
+                  }))
+                }
+                placeholder="models/mi_modelo.pt o yolov8n.pt"
+              />
+              <div className="space-y-1 text-xs text-muted-foreground">
+                <p>Selecciona un modelo YOLO detectado localmente o escribe la ruta manual si aún no aparece en la lista.</p>
+                {detectorRecommendedCustomPath ? <p>Ruta sugerida para modelos custom: <span className="font-mono text-slate-300">{detectorRecommendedCustomPath}</span></p> : null}
+                {detectorModelsQuery.isLoading ? <p>Buscando modelos YOLO locales...</p> : null}
+                {(detectorModelsQuery.data?.notes ?? []).length ? (
+                  <div className="rounded-md border border-white/10 bg-black/20 p-2 text-xs text-slate-300">
+                    {(detectorModelsQuery.data?.notes ?? []).map((note, idx) => (
+                      <p key={`detector-note-${idx}`}>- {note}</p>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          </div>
+
+          <div className="grid gap-4 md:grid-cols-2">
+            <div className="space-y-2">
+              <Label>roboflow.workspace</Label>
+              <Input
+                value={detectorRoboflowWorkspace}
+                onChange={(e) =>
+                  setWorkingConfig((prev) => ({
+                    ...prev,
+                    detection_config: {
+                      ...(prev.detection_config ?? {}),
+                      roboflow: { ...((((prev.detection_config ?? {}) as Record<string, unknown>).roboflow as Record<string, unknown>) ?? {}), workspace: e.target.value },
+                    },
+                  }))
+                }
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>roboflow.project</Label>
+              <Input
+                value={detectorRoboflowProject}
+                onChange={(e) =>
+                  setWorkingConfig((prev) => ({
+                    ...prev,
+                    detection_config: {
+                      ...(prev.detection_config ?? {}),
+                      roboflow: { ...((((prev.detection_config ?? {}) as Record<string, unknown>).roboflow as Record<string, unknown>) ?? {}), project: e.target.value },
+                    },
+                  }))
+                }
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>roboflow.version</Label>
+              <Input
+                type="number"
+                min={1}
+                value={detectorRoboflowVersion}
+                onChange={(e) =>
+                  setWorkingConfig((prev) => ({
+                    ...prev,
+                    detection_config: {
+                      ...(prev.detection_config ?? {}),
+                      roboflow: { ...((((prev.detection_config ?? {}) as Record<string, unknown>).roboflow as Record<string, unknown>) ?? {}), version: Number(e.target.value || 1) },
+                    },
+                  }))
+                }
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>roboflow.api_key (opcional)</Label>
+              <Input
+                type="password"
+                value={detectorRoboflowApiKey}
+                onChange={(e) =>
+                  setWorkingConfig((prev) => ({
+                    ...prev,
+                    detection_config: {
+                      ...(prev.detection_config ?? {}),
+                      roboflow: { ...((((prev.detection_config ?? {}) as Record<string, unknown>).roboflow as Record<string, unknown>) ?? {}), api_key: e.target.value },
+                    },
+                  }))
+                }
+              />
+            </div>
+          </div>
+
+          <div className="grid gap-4 md:grid-cols-2">
+            <div className="space-y-2">
+              <TagsInput
+                label="filters.allowed_labels"
+                description="Etiquetas que sí quieres considerar."
+                values={detectorAllowedLabels}
+                suggestions={detectorLabelSuggestions}
+                placeholder="Escribe una etiqueta y presiona Enter"
+                onChange={(values) =>
+                  setWorkingConfig((prev) => ({
+                    ...prev,
+                    detection_config: {
+                      ...(prev.detection_config ?? {}),
+                      filters: {
+                        ...((((prev.detection_config ?? {}) as Record<string, unknown>).filters as Record<string, unknown>) ?? {}),
+                        allowed_labels: values,
+                      },
+                    },
+                  }))
+                }
+              />
+            </div>
+            <div className="space-y-2">
+              <TagsInput
+                label="filters.ignored_labels"
+                description="Etiquetas que el detector debe ignorar."
+                values={detectorIgnoredLabels}
+                suggestions={detectorIgnoredDefaultSuggestions}
+                placeholder="Escribe una etiqueta y presiona Enter"
+                onChange={(values) =>
+                  setWorkingConfig((prev) => ({
+                    ...prev,
+                    detection_config: {
+                      ...(prev.detection_config ?? {}),
+                      filters: {
+                        ...((((prev.detection_config ?? {}) as Record<string, unknown>).filters as Record<string, unknown>) ?? {}),
+                        ignored_labels: values,
+                      },
+                    },
+                  }))
+                }
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>filters.min_confidence</Label>
+              <Input
+                type="text"
+                inputMode="decimal"
+                value={Number.isFinite(detectorMinConfidence) ? detectorMinConfidence : 0.4}
+                onChange={(e) =>
+                  setWorkingConfig((prev) => ({
+                    ...prev,
+                    detection_config: {
+                      ...(prev.detection_config ?? {}),
+                      filters: {
+                        ...((((prev.detection_config ?? {}) as Record<string, unknown>).filters as Record<string, unknown>) ?? {}),
+                        min_confidence: parseLocaleNumber(e.target.value, 0.4),
+                      },
+                    },
+                  }))
+                }
+              />
+            </div>
+            <div className="flex items-center justify-between rounded-lg border border-white/10 p-3">
+              <div>
+                <p className="text-sm font-medium">fallback_to_local_on_error</p>
+                <p className="text-xs text-muted-foreground">Si Roboflow falla, intenta local.</p>
+              </div>
+              <Switch
+                checked={Boolean(detectionConfig.fallback_to_local_on_error)}
+                onCheckedChange={(checked) =>
+                  setWorkingConfig((prev) => ({
+                    ...prev,
+                    detection_config: {
+                      ...(prev.detection_config ?? {}),
+                      fallback_to_local_on_error: checked,
+                    },
+                  }))
+                }
+              />
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-white/10 p-4">
+            <div className="mb-4 flex items-center justify-between">
+              <div>
+                <p className="text-sm font-medium">primary_area_filter</p>
+                <p className="text-xs text-muted-foreground">Sirve para descartar detecciones secundarias cuando una promoción principal domina la escena.</p>
+              </div>
+              <Switch
+                checked={Boolean(primaryAreaFilter.enabled)}
+                onCheckedChange={(checked) =>
+                  setWorkingConfig((prev) => ({
+                    ...prev,
+                    detection_config: {
+                      ...(prev.detection_config ?? {}),
+                      primary_area_filter: {
+                        ...((((prev.detection_config ?? {}) as Record<string, unknown>).primary_area_filter as Record<string, unknown>) ?? {}),
+                        enabled: checked,
+                      },
+                    },
+                  }))
+                }
+              />
+            </div>
+            <div className="grid gap-4 md:grid-cols-3">
+              <div className="space-y-2">
+                <Label>discard_if_smaller_pct</Label>
+                <Input
+                  type="number"
+                  min={1}
+                  max={100}
+                  value={Number(primaryAreaFilter.discard_if_smaller_pct ?? 80) || 80}
+                  onChange={(e) =>
+                    setWorkingConfig((prev) => ({
+                      ...prev,
+                      detection_config: {
+                        ...(prev.detection_config ?? {}),
+                        primary_area_filter: {
+                          ...((((prev.detection_config ?? {}) as Record<string, unknown>).primary_area_filter as Record<string, unknown>) ?? {}),
+                          discard_if_smaller_pct: Number(e.target.value || 80),
+                        },
+                      },
+                    }))
+                  }
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>min_detections</Label>
+                <Input
+                  type="number"
+                  min={1}
+                  value={Number(primaryAreaFilter.min_detections ?? 2) || 2}
+                  onChange={(e) =>
+                    setWorkingConfig((prev) => ({
+                      ...prev,
+                      detection_config: {
+                        ...(prev.detection_config ?? {}),
+                        primary_area_filter: {
+                          ...((((prev.detection_config ?? {}) as Record<string, unknown>).primary_area_filter as Record<string, unknown>) ?? {}),
+                          min_detections: Number(e.target.value || 2),
+                        },
+                      },
+                    }))
+                  }
+                />
+              </div>
+              <div className="flex items-center justify-between rounded-lg border border-white/10 p-3">
+                <div>
+                  <p className="text-sm font-medium">include_scaled_reference</p>
+                  <p className="text-xs text-muted-foreground">Incluye referencia escalada al comparar áreas.</p>
+                </div>
+                <Switch
+                  checked={Boolean(primaryAreaFilter.include_scaled_reference)}
+                  onCheckedChange={(checked) =>
+                    setWorkingConfig((prev) => ({
+                      ...prev,
+                      detection_config: {
+                        ...(prev.detection_config ?? {}),
+                        primary_area_filter: {
+                          ...((((prev.detection_config ?? {}) as Record<string, unknown>).primary_area_filter as Record<string, unknown>) ?? {}),
+                          include_scaled_reference: checked,
+                        },
+                      },
+                    }))
+                  }
+                />
+              </div>
+            </div>
+          </div>
+
+          <div className="grid gap-2 md:grid-cols-3">
+            <Button
+              type="button"
+              variant="outline"
+              disabled={validateDetectorMutation.isPending}
+              onClick={() => validateDetectorMutation.mutate(false)}
+            >
+              {validateDetectorMutation.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+              Validar detector
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={validateDetectorMutation.isPending}
+              onClick={() => validateDetectorMutation.mutate(true)}
+            >
+              {validateDetectorMutation.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+              Probar carga modelo local
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => {
+                detectorModelsQuery.refetch();
+                detectorStatusQuery.refetch();
+              }}
+            >
+              <RefreshCcw className="mr-2 h-4 w-4" />
+              Recargar estado detector
+            </Button>
+          </div>
+
+          <div className="rounded-lg border border-white/10 bg-black/20 p-3 text-xs">
+            <div className="mb-2 flex items-center justify-between">
+              <p className="font-medium text-slate-200">Modelos locales detectados</p>
+              <Button type="button" size="sm" variant="outline" onClick={() => detectorModelsQuery.refetch()} disabled={detectorModelsQuery.isFetching}>
+                {detectorModelsQuery.isFetching ? <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" /> : null}
+                Ver modelos locales
+              </Button>
+            </div>
+            <p className="mb-2 text-muted-foreground">recommended_custom_path: {detectorModelsQuery.data?.recommended_custom_path ?? "-"}</p>
+            <div className="max-h-36 overflow-auto rounded border border-white/10">
+              <table className="w-full text-left">
+                <thead className="border-b border-white/10 text-slate-400">
+                  <tr><th className="px-2 py-1">path</th><th className="px-2 py-1">filename</th><th className="px-2 py-1">size_bytes</th></tr>
+                </thead>
+                <tbody>
+                  {(detectorModelsQuery.data?.models ?? []).map((model) => (
+                    <tr key={model.path} className="border-b border-white/5">
+                      <td className="px-2 py-1 font-mono">{model.path}</td>
+                      <td className="px-2 py-1">{model.filename ?? "-"}</td>
+                      <td className="px-2 py-1">{model.size_bytes ?? "-"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-white/10 bg-black/20 p-3 text-xs text-slate-300">
+            <p className="font-medium text-slate-200">Tips operativos</p>
+            <p className="mt-1">Si el modelo es <code>yolov8n.pt</code>, sirve para prueba técnica pero no para clases custom como promociones.</p>
+            <p className="mt-1">Si <code>ready=false</code>, puedes guardar igual, pero el modo local no quedará listo hasta tener el .pt correcto.</p>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card className="border-white/10 bg-white/5 backdrop-blur">
+        <CardHeader><CardTitle>Text Enrichment</CardTitle></CardHeader>
+        <CardContent className="space-y-4">
+          <div className="rounded-lg border border-white/10 p-3">
+            <div className="flex items-center justify-between">
+              <span>enabled</span>
+              <Switch
+                checked={textEnrichment.enabled !== false}
+                onCheckedChange={(checked) => {
+                  setTextEnrichmentExplicit((prev) => ({ ...prev, enabled: true }));
+                  setWorkingConfig((prev) => ({ ...prev, text_enrichment: { ...(prev.text_enrichment ?? {}), enabled: checked } }));
+                }}
+              />
+            </div>
+            <p className="mt-1 text-xs text-muted-foreground">
+              {textEnrichmentExplicit.enabled ? "Configurado explícitamente" : "Activo por default del backend"}
+            </p>
+          </div>
+          <div className="grid gap-4 md:grid-cols-2">
+            <div className="space-y-2">
+              <Label>text_enrichment.model</Label>
+              <Input
+                value={typeof textEnrichment.model === "string" ? textEnrichment.model : "qwen3:8b"}
+                onChange={(e) => setWorkingConfig((prev) => ({ ...prev, text_enrichment: { ...(prev.text_enrichment ?? {}), model: e.target.value } }))}
+                placeholder="qwen3:8b"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>semantic_rag.limit</Label>
+              <Input
+                type="number"
+                min={1}
+                max={30}
+                value={typeof (textEnrichment.semantic_rag as Record<string, unknown> | undefined)?.limit === "number" ? ((textEnrichment.semantic_rag as Record<string, unknown>).limit as number) : 8}
+                onChange={(e) => setWorkingConfig((prev) => ({
+                  ...prev,
+                  text_enrichment: {
+                    ...(prev.text_enrichment ?? {}),
+                    semantic_rag: {
+                      ...(((prev.text_enrichment ?? {}) as Record<string, unknown>).semantic_rag as Record<string, unknown> ?? {}),
+                      limit: Number(e.target.value || 8),
+                    },
+                  },
+                }))}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>semantic_rag.rollout_mode</Label>
+              <select
+                className="h-10 w-full rounded-md border border-white/15 bg-black/30 px-3 text-sm"
+                value={typeof (textEnrichment.semantic_rag as Record<string, unknown> | undefined)?.rollout_mode === "string" ? String((textEnrichment.semantic_rag as Record<string, unknown>).rollout_mode) : "apply"}
+                onChange={(e) =>
+                  setWorkingConfig((prev) => ({
+                    ...prev,
+                    text_enrichment: {
+                      ...(prev.text_enrichment ?? {}),
+                      semantic_rag: {
+                        ...(((prev.text_enrichment ?? {}) as Record<string, unknown>).semantic_rag as Record<string, unknown> ?? {}),
+                        rollout_mode: e.target.value,
+                      },
+                    },
+                  }))
+                }
+              >
+                <option value="apply">apply</option>
+                <option value="shadow">shadow</option>
+              </select>
+            </div>
+          </div>
+          <div className="rounded-lg border border-white/10 p-3">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm">semantic_rag.enabled</p>
+                <p className="text-xs text-muted-foreground">Activa contexto RAG para el enricher semántico textual.</p>
+              </div>
+              <Switch
+                checked={((textEnrichment.semantic_rag as Record<string, unknown> | undefined)?.enabled) !== false}
+                onCheckedChange={(checked) => {
+                  setTextEnrichmentExplicit((prev) => ({ ...prev, semanticRagEnabled: true }));
+                  setWorkingConfig((prev) => ({
+                    ...prev,
+                    text_enrichment: {
+                      ...(prev.text_enrichment ?? {}),
+                      semantic_rag: {
+                        ...(((prev.text_enrichment ?? {}) as Record<string, unknown>).semantic_rag as Record<string, unknown> ?? {}),
+                        enabled: checked,
+                      },
+                    },
+                  }));
+                }}
+              />
+            </div>
+            <p className="mt-1 text-xs text-muted-foreground">
+              {textEnrichmentExplicit.semanticRagEnabled ? "Configurado explícitamente" : "Activo por default del backend"}
+            </p>
+          </div>
+          <div className="rounded-lg border border-emerald-300/20 bg-emerald-500/10 p-3">
+            <div className="mb-3 flex items-center justify-between">
+              <div>
+                <p className="text-sm font-medium">measure_noise_rules.enabled</p>
+                <p className="text-xs text-muted-foreground">Corrige ruido de medidas por cadena (ej. 7 75ML, 90 900ML).</p>
+              </div>
+              <Switch
+                checked={Boolean((((textEnrichment.measure_noise_rules as Record<string, unknown> | undefined) ?? {}).enabled))}
+                onCheckedChange={(checked) => setWorkingConfig((prev) => ({
+                  ...prev,
+                  text_enrichment: {
+                    ...(prev.text_enrichment ?? {}),
+                    measure_noise_rules: {
+                      ...((((prev.text_enrichment ?? {}) as Record<string, unknown>).measure_noise_rules as Record<string, unknown>) ?? {}),
+                      enabled: checked,
+                    },
+                  },
+                }))}
+              />
+            </div>
+            <div className="space-y-2">
+              <TagsInput
+                label="measure_noise_rules.chains"
+                description="Cadenas donde aplicar corrección de ruido de medidas."
+                values={measureNoiseChains}
+                suggestions={measureNoiseChainSuggestions}
+                placeholder="Ej: mi comisariato"
+                onChange={(values) =>
+                  setWorkingConfig((prev) => ({
+                    ...prev,
+                    text_enrichment: {
+                      ...(prev.text_enrichment ?? {}),
+                      measure_noise_rules: {
+                        ...((((prev.text_enrichment ?? {}) as Record<string, unknown>).measure_noise_rules as Record<string, unknown>) ?? {}),
+                        chains: values,
+                      },
+                    },
+                  }))
+                }
+              />
+            </div>
+          </div>
+          <div className="flex items-center justify-between rounded-lg border border-cyan-300/20 bg-cyan-500/10 p-3">
+            <div>
+              <p className="text-sm font-medium">Guardrail de evidencia local semántica</p>
+              <p className="text-xs text-muted-foreground">
+                Solo marca una regla semántica como aplicada si la evidencia aparece en el producto actual, evitando mezclar texto de otros productos del mismo OCR.
+              </p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                {textEnrichmentExplicit.semanticScopeEnabled ? "Configurado explícitamente" : "Activo por default del backend"}
+              </p>
+            </div>
+            <Switch
+              checked={(((textEnrichment.semantic_scope_guardrails as Record<string, unknown> | undefined) ?? {}).enabled) !== false}
+              onCheckedChange={(checked) => {
+                setTextEnrichmentExplicit((prev) => ({ ...prev, semanticScopeEnabled: true }));
+                setWorkingConfig((prev) => ({
+                  ...prev,
+                  text_enrichment: {
+                    ...(prev.text_enrichment ?? {}),
+                    semantic_scope_guardrails: {
+                      ...((((prev.text_enrichment ?? {}) as Record<string, unknown>).semantic_scope_guardrails as Record<string, unknown>) ?? {}),
+                      enabled: checked,
+                    },
+                  },
+                }));
+              }}
+            />
+          </div>
+          <div className="rounded-lg border border-violet-300/20 bg-violet-500/10 p-4">
+            <div className="mb-4 flex items-center justify-between">
+              <div>
+                <p className="text-sm font-medium">promotion_catalog_memory</p>
+                <p className="text-xs text-muted-foreground">Memoria comercial basada en `shelf_skus` para promociones. Puede operar en modo shadow o aplicarse si tú lo decides.</p>
+              </div>
+              <Switch
+                checked={Boolean(promotionCatalogMemory.enabled)}
+                onCheckedChange={(checked) =>
+                  setWorkingConfig((prev) => ({
+                    ...prev,
+                    text_enrichment: {
+                      ...(prev.text_enrichment ?? {}),
+                      promotion_catalog_memory: {
+                        ...((((prev.text_enrichment ?? {}) as Record<string, unknown>).promotion_catalog_memory as Record<string, unknown>) ?? {}),
+                        enabled: checked,
+                      },
+                    },
+                  }))
+                }
+              />
+            </div>
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+              <div className="space-y-2">
+                <Label>mode</Label>
+                <select
+                  className="h-10 w-full rounded-md border border-white/15 bg-black/30 px-3 text-sm"
+                  value={typeof promotionCatalogMemory.mode === "string" ? promotionCatalogMemory.mode : "shadow"}
+                  onChange={(e) =>
+                    setWorkingConfig((prev) => ({
+                      ...prev,
+                      text_enrichment: {
+                        ...(prev.text_enrichment ?? {}),
+                        promotion_catalog_memory: {
+                          ...((((prev.text_enrichment ?? {}) as Record<string, unknown>).promotion_catalog_memory as Record<string, unknown>) ?? {}),
+                          mode: e.target.value,
+                        },
+                      },
+                    }))
+                  }
+                >
+                  <option value="off">off</option>
+                  <option value="shadow">shadow</option>
+                  <option value="assist">assist</option>
+                  <option value="validate">validate</option>
+                </select>
+              </div>
+              <div className="space-y-2">
+                <Label>source</Label>
+                <Input
+                  value={typeof promotionCatalogMemory.source === "string" ? promotionCatalogMemory.source : "shelf_skus"}
+                  onChange={(e) =>
+                    setWorkingConfig((prev) => ({
+                      ...prev,
+                      text_enrichment: {
+                        ...(prev.text_enrichment ?? {}),
+                        promotion_catalog_memory: {
+                          ...((((prev.text_enrichment ?? {}) as Record<string, unknown>).promotion_catalog_memory as Record<string, unknown>) ?? {}),
+                          source: e.target.value,
+                        },
+                      },
+                    }))
+                  }
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>max_candidates</Label>
+                <Input
+                  type="number"
+                  min={1}
+                  max={25}
+                  value={Number(promotionCatalogMemory.max_candidates ?? 8) || 8}
+                  onChange={(e) =>
+                    setWorkingConfig((prev) => ({
+                      ...prev,
+                      text_enrichment: {
+                        ...(prev.text_enrichment ?? {}),
+                        promotion_catalog_memory: {
+                          ...((((prev.text_enrichment ?? {}) as Record<string, unknown>).promotion_catalog_memory as Record<string, unknown>) ?? {}),
+                          max_candidates: Number(e.target.value || 8),
+                        },
+                      },
+                    }))
+                  }
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>min_score</Label>
+                <Input
+                  type="number"
+                  min={0}
+                  max={1.5}
+                  step="0.01"
+                  value={Number(promotionCatalogMemory.min_score ?? 0.62) || 0.62}
+                  onChange={(e) =>
+                    setWorkingConfig((prev) => ({
+                      ...prev,
+                      text_enrichment: {
+                        ...(prev.text_enrichment ?? {}),
+                        promotion_catalog_memory: {
+                          ...((((prev.text_enrichment ?? {}) as Record<string, unknown>).promotion_catalog_memory as Record<string, unknown>) ?? {}),
+                          min_score: parseLocaleNumber(e.target.value, 0.62),
+                        },
+                      },
+                    }))
+                  }
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>top1 vs top2 delta mínimo</Label>
+                <Input
+                  type="number"
+                  min={0}
+                  max={1}
+                  step="0.01"
+                  value={Number(promotionCatalogMemory.block_if_ambiguous_top2_delta_below ?? 0.08) || 0.08}
+                  onChange={(e) =>
+                    setWorkingConfig((prev) => ({
+                      ...prev,
+                      text_enrichment: {
+                        ...(prev.text_enrichment ?? {}),
+                        promotion_catalog_memory: {
+                          ...((((prev.text_enrichment ?? {}) as Record<string, unknown>).promotion_catalog_memory as Record<string, unknown>) ?? {}),
+                          block_if_ambiguous_top2_delta_below: parseLocaleNumber(e.target.value, 0.08),
+                        },
+                      },
+                    }))
+                  }
+                />
+              </div>
+            </div>
+            <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+              <div className="flex items-center justify-between rounded-lg border border-white/10 p-3">
+                <div>
+                  <p className="text-sm font-medium">require_local_evidence</p>
+                  <p className="text-xs text-muted-foreground">Bloquea aplicación si el OCR local no sostiene el match.</p>
+                </div>
+                <Switch
+                  checked={promotionCatalogMemory.require_local_evidence !== false}
+                  onCheckedChange={(checked) =>
+                    setWorkingConfig((prev) => ({
+                      ...prev,
+                      text_enrichment: {
+                        ...(prev.text_enrichment ?? {}),
+                        promotion_catalog_memory: {
+                          ...((((prev.text_enrichment ?? {}) as Record<string, unknown>).promotion_catalog_memory as Record<string, unknown>) ?? {}),
+                          require_local_evidence: checked,
+                        },
+                      },
+                    }))
+                  }
+                />
+              </div>
+              <div className="flex items-center justify-between rounded-lg border border-white/10 p-3">
+                <div>
+                  <p className="text-sm font-medium">include_in_enricher_prompt</p>
+                  <p className="text-xs text-muted-foreground">Envía candidatos del catálogo al enriquecedor textual.</p>
+                </div>
+                <Switch
+                  checked={Boolean(promotionCatalogMemory.include_in_enricher_prompt)}
+                  onCheckedChange={(checked) =>
+                    setWorkingConfig((prev) => ({
+                      ...prev,
+                      text_enrichment: {
+                        ...(prev.text_enrichment ?? {}),
+                        promotion_catalog_memory: {
+                          ...((((prev.text_enrichment ?? {}) as Record<string, unknown>).promotion_catalog_memory as Record<string, unknown>) ?? {}),
+                          include_in_enricher_prompt: checked,
+                        },
+                      },
+                    }))
+                  }
+                />
+              </div>
+              <div className="flex items-center justify-between rounded-lg border border-white/10 p-3">
+                <div>
+                  <p className="text-sm font-medium">allow_product_name_rewrite</p>
+                  <p className="text-xs text-muted-foreground">Permite reescribir nombre solo si el modo y el match lo justifican.</p>
+                </div>
+                <Switch
+                  checked={Boolean(promotionCatalogMemory.allow_product_name_rewrite)}
+                  onCheckedChange={(checked) =>
+                    setWorkingConfig((prev) => ({
+                      ...prev,
+                      text_enrichment: {
+                        ...(prev.text_enrichment ?? {}),
+                        promotion_catalog_memory: {
+                          ...((((prev.text_enrichment ?? {}) as Record<string, unknown>).promotion_catalog_memory as Record<string, unknown>) ?? {}),
+                          allow_product_name_rewrite: checked,
+                        },
+                      },
+                    }))
+                  }
+                />
+              </div>
+            </div>
+            <div className="mt-4 grid gap-4 xl:grid-cols-2">
+              <TagsInput
+                label="allow_field_fill"
+                description="Campos que puede completar en modos asistidos."
+                values={promotionCatalogAllowFieldFill}
+                suggestions={["marca", "tamano", "variante", "fabricante", "categoria"]}
+                placeholder="marca, tamano, variante..."
+                onChange={(values) =>
+                  setWorkingConfig((prev) => ({
+                    ...prev,
+                    text_enrichment: {
+                      ...(prev.text_enrichment ?? {}),
+                      promotion_catalog_memory: {
+                        ...((((prev.text_enrichment ?? {}) as Record<string, unknown>).promotion_catalog_memory as Record<string, unknown>) ?? {}),
+                        allow_field_fill: values,
+                      },
+                    },
+                  }))
+                }
+              />
+              <TagsInput
+                label="audit_only_fields"
+                description="Campos solo auditables, no aplicables automáticamente."
+                values={promotionCatalogAuditOnlyFields}
+                suggestions={["fabricante", "categoria", "subcategoria"]}
+                placeholder="fabricante, categoria..."
+                onChange={(values) =>
+                  setWorkingConfig((prev) => ({
+                    ...prev,
+                    text_enrichment: {
+                      ...(prev.text_enrichment ?? {}),
+                      promotion_catalog_memory: {
+                        ...((((prev.text_enrichment ?? {}) as Record<string, unknown>).promotion_catalog_memory as Record<string, unknown>) ?? {}),
+                        audit_only_fields: values,
+                      },
+                    },
+                  }))
+                }
+              />
+            </div>
+            <div className="mt-4 rounded-lg border border-white/10 bg-black/20 p-3 text-xs text-slate-300">
+              <p><span className="font-medium text-slate-100">shadow:</span> solo audita, no cambia resultado.</p>
+              <p className="mt-1"><span className="font-medium text-slate-100">assist:</span> completa campos permitidos si hay evidencia local suficiente.</p>
+              <p className="mt-1"><span className="font-medium text-slate-100">validate:</span> aplica con guardrails más fuertes y puede reescribir nombre solo si tú lo habilitas.</p>
+            </div>
+          </div>
+          <div className="rounded-lg border border-white/10 p-3">
+            <p className="mb-2 text-xs text-muted-foreground">normalization_map (solo lectura rápida)</p>
+            <pre className="max-h-52 overflow-auto text-xs">{JSON.stringify(textEnrichment.normalization_map ?? {}, null, 2)}</pre>
+          </div>
+
+          <div className="rounded-lg border border-white/10 p-4">
+            <div className="mb-3 flex items-center justify-between">
+              <div>
+                <p className="text-sm font-medium">text_enrichment.product_dedupe</p>
+                <p className="text-xs text-muted-foreground">Bloque avanzado para deduplicación semántica. Se mantiene editable en JSON para no ocultar flags menos comunes.</p>
+              </div>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={() =>
+                  applyAdvancedJsonConfig("text_enrichment.product_dedupe", productDedupeText, (parsed) =>
+                    setWorkingConfig((prev) => ({
+                      ...prev,
+                      text_enrichment: { ...(prev.text_enrichment ?? {}), product_dedupe: parsed },
+                    })),
+                  )
+                }
+              >
+                Aplicar JSON
+              </Button>
+            </div>
+            <Textarea value={productDedupeText} onChange={(e) => setProductDedupeText(e.target.value)} className="min-h-36 font-mono text-xs" />
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card className="border-white/10 bg-white/5 backdrop-blur">
+        <CardHeader>
+          <CardTitle>Bloques avanzados</CardTitle>
+          <CardDescription>Aqui exponemos configuraciones que suelen quedarse ocultas: barcodes, filtros de keywords y otros bloques de runtime. El guardado sigue haciendo merge con la config activa completa.</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid gap-4 xl:grid-cols-2">
+            <div className="rounded-lg border border-white/10 p-4">
+              <div className="mb-3 flex items-center justify-between">
+                <div>
+                  <p className="text-sm font-medium">barcode_settings</p>
+                  <p className="text-xs text-muted-foreground">Ajustes generales de lectura y priorización de códigos de barras.</p>
+                </div>
+                <Button type="button" size="sm" variant="outline" onClick={() => applyAdvancedJsonConfig("barcode_settings", barcodeSettingsText, (parsed) => setWorkingConfig((prev) => ({ ...prev, barcode_settings: parsed })))}>Aplicar JSON</Button>
+              </div>
+              <Textarea value={barcodeSettingsText} onChange={(e) => setBarcodeSettingsText(e.target.value)} className="min-h-40 font-mono text-xs" />
+            </div>
+
+            <div className="rounded-lg border border-white/10 p-4">
+              <div className="mb-3 flex items-center justify-between">
+                <div>
+                  <p className="text-sm font-medium">chain_barcode_rules</p>
+                  <p className="text-xs text-muted-foreground">Reglas por cadena para adaptar lectura o resolución de barcode.</p>
+                </div>
+                <Button type="button" size="sm" variant="outline" onClick={() => applyAdvancedJsonConfig("chain_barcode_rules", chainBarcodeRulesText, (parsed) => setWorkingConfig((prev) => ({ ...prev, chain_barcode_rules: parsed })))}>Aplicar JSON</Button>
+              </div>
+              <Textarea value={chainBarcodeRulesText} onChange={(e) => setChainBarcodeRulesText(e.target.value)} className="min-h-40 font-mono text-xs" />
+            </div>
+
+            <div className="rounded-lg border border-white/10 p-4">
+              <div className="mb-3 flex items-center justify-between">
+                <div>
+                  <p className="text-sm font-medium">barcode_correction</p>
+                  <p className="text-xs text-muted-foreground">Correcciones o reparaciones de barcode antes de resolver producto.</p>
+                </div>
+                <Button type="button" size="sm" variant="outline" onClick={() => applyAdvancedJsonConfig("barcode_correction", barcodeCorrectionText, (parsed) => setWorkingConfig((prev) => ({ ...prev, barcode_correction: parsed })))}>Aplicar JSON</Button>
+              </div>
+              <Textarea value={barcodeCorrectionText} onChange={(e) => setBarcodeCorrectionText(e.target.value)} className="min-h-40 font-mono text-xs" />
+            </div>
+
+            <div className="rounded-lg border border-white/10 p-4">
+              <div className="mb-3 flex items-center justify-between">
+                <div>
+                  <p className="text-sm font-medium">keyword_filters</p>
+                  <p className="text-xs text-muted-foreground">Filtros adicionales de texto o reglas de descarte por palabra clave.</p>
+                </div>
+                <Button type="button" size="sm" variant="outline" onClick={() => applyAdvancedJsonConfig("keyword_filters", keywordFiltersText, (parsed) => setWorkingConfig((prev) => ({ ...prev, keyword_filters: parsed })))}>Aplicar JSON</Button>
+              </div>
+              <Textarea value={keywordFiltersText} onChange={(e) => setKeywordFiltersText(e.target.value)} className="min-h-40 font-mono text-xs" />
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card className="border-white/10 bg-white/5 backdrop-blur">
+        <CardHeader><CardTitle>Versiones</CardTitle></CardHeader>
+        <CardContent>
+          <div className="mb-3 grid gap-3 md:grid-cols-3">
+            <div className="space-y-2">
+              <Label>version (backend acepta vX/next/1/v2)</Label>
+              <Input value={version} onChange={(event) => setVersion(event.target.value)} />
+            </div>
+            <div className="flex items-end">
+              <Button type="button" variant="outline" onClick={() => setVersion("vX")}>Usar vX (auto)</Button>
+            </div>
+            <div className="flex items-end">
+              <Button type="button" variant="outline" onClick={() => setShowPayloadDebug((prev) => !prev)}>
+                {showPayloadDebug ? "Ocultar payload debug" : "Mostrar payload debug"}
+              </Button>
+            </div>
+          </div>
+          {showPayloadDebug ? (
+            <div className="mb-3 rounded-lg border border-cyan-300/20 bg-cyan-500/10 p-3">
+              <div className="mb-2 flex flex-wrap gap-2">
+                <Button
+                  size="sm"
+                  type="button"
+                  onClick={async () => {
+                    await navigator.clipboard.writeText(JSON.stringify(debugPayload, null, 2));
+                    toast.success("Payload copiado");
+                  }}
+                >
+                  Copiar payload
+                </Button>
+              </div>
+              <pre className="max-h-52 overflow-auto text-xs">{JSON.stringify(debugPayload, null, 2)}</pre>
+            </div>
+          ) : null}
+          <pre className="max-h-52 overflow-auto text-xs">{JSON.stringify(listQuery.data?.configs ?? [], null, 2)}</pre>
+        </CardContent>
+      </Card>
+
+      <div className="md:sticky md:bottom-4 z-10 flex justify-end">
+        <Button onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending || shouldBlockSaveDetector} className="shadow-lg shadow-cyan-600/20">
+          {saveMutation.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
+          Guardar y activar
+        </Button>
+      </div>
+    </div>
+  );
+}

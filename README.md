@@ -1,36 +1,66 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+﻿# Supermarket OCR Web
 
-## Getting Started
+Frontend Next.js 15 + TypeScript para OCR multi-cuenta.
 
-First, run the development server:
+## Instalación
+
+```bash
+npm install
+```
+
+## Entorno
+
+Crear `web/.env.local`:
+
+```bash
+NEXT_PUBLIC_API_BASE_URL=http://localhost:8080
+```
+
+Escenarios:
+
+- Local: `http://localhost:8080`
+- Docker frontend: `http://host.docker.internal:8080`
+- WSL: `http://127.0.0.1:8080` o IP del host
+
+## Ejecutar
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## Rutas principales
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+- `/jobs/new`: upload -> file_ids -> create job
+- `/jobs/[jobId]`: status, imágenes, eventos y resultados
+- `/configs`: configuración básica por cuenta
+- `/ops`: diagnóstico backend (`/health`, recent jobs/uploads)
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Módulo semántico
 
-## Learn More
+- `/accounts/[account]/config`
+  - editar config activa por cuenta
+  - soporte de etiquetas (`support_labels`)
+  - detección, text enrichment y guardado con deep merge
+- `/accounts/[account]/aliases`
+  - listar, crear, editar y activar/desactivar aliases semánticos
+- `/accounts/[account]/playground`
+  - prueba rápida upload -> job -> monitoreo -> resultados
 
-To learn more about Next.js, take a look at the following resources:
+## Flujo recomendado (no técnico)
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+1. Ir a `/accounts/colgate_ecuador/config` y ajustar reglas.
+2. Ir a `/accounts/colgate_ecuador/aliases` y mantener diccionario semántico.
+3. Probar en `/accounts/colgate_ecuador/playground`.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Troubleshooting
 
-## Deploy on Vercel
+- `400`: request inválido o file_id inválido
+- `404`: no existe o resultados aún no disponibles
+- `413`: excede límites de tamaño/cantidad
+- `415`: MIME/extensión no soportada
+- `422`: payload inválido
+- `500`: error interno backend
+- `NETWORK - ...`: backend no alcanzable
+- `NETWORK - Timeout conectando con backend.`: backend respondió fuera de 20s
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Usa `/ops` y botón **Probar conexión backend** en `/jobs/new` para diagnóstico rápido.
