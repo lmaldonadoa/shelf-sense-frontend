@@ -1926,6 +1926,95 @@ export type ShelfJobRerunResponse = {
   message?: string;
 };
 
+// ---------------------------------------------------------------------------
+// Promotions job rerun / compare / delete
+// ---------------------------------------------------------------------------
+
+export type PromotionsJobRerunRequest = {
+  mode: "new" | "overwrite";
+  config_name?: string | null;
+  cadena?: string | null;
+  subcategoria?: string | null;
+  id_pdv?: string | null;
+  usuario_relevo?: string | null;
+};
+
+export type PromotionsJobRerunResponse = {
+  status: string;
+  mode: "new" | "overwrite";
+  job_id?: string;       // overwrite mode
+  new_job_id?: string;   // new mode
+  source_job_id?: string | null;
+  rerun_of_job_id?: string | null;
+  retry_count?: number;
+  total_images?: number;
+  message?: string;
+};
+
+export type PromotionsBulkRerunRequest = {
+  job_ids: string[];
+  mode: "new" | "overwrite";
+  config_name?: string | null;
+  cadena?: string | null;
+  subcategoria?: string | null;
+};
+
+export type PromotionsBulkRerunResponse = {
+  account_name: string;
+  mode: string;
+  total: number;
+  queued: number;
+  errors: number;
+  results: Array<{ job_id: string; status: string; new_job_id?: string; detail?: string }>;
+};
+
+export type JobCompareProductChange = {
+  key: string;
+  changes: Record<string, { before: string | null; after: string | null }>;
+};
+
+export type JobCompareResponse = {
+  account_name: string;
+  job_a: { job_id: string; status: string; created_at?: string; product_count: number; field_fill_ratio: number };
+  job_b: { job_id: string; status: string; created_at?: string; product_count: number; field_fill_ratio: number };
+  delta: {
+    products_added: number;
+    products_removed: number;
+    products_changed: number;
+    products_unchanged: number;
+    field_fill_delta: number;
+    improved: boolean;
+  };
+  detail: {
+    added: Record<string, unknown>[];
+    removed: Record<string, unknown>[];
+    changed: JobCompareProductChange[];
+  };
+};
+
+export type JobDeleteRequest = {
+  delete_local_files?: boolean;
+  delete_mysql?: boolean;
+  dry_run?: boolean;
+  confirm: string;
+};
+
+export type BulkJobDeleteRequest = {
+  job_ids: string[];
+  delete_local_files?: boolean;
+  delete_mysql?: boolean;
+  dry_run?: boolean;
+  confirm: string;
+};
+
+export type BulkJobDeleteResponse = {
+  dry_run: boolean;
+  total: number;
+  deleted: number;
+  errors: number;
+  results: Array<Record<string, unknown>>;
+};
+
 export type ShelfCandidate = {
   sku_id?: number | string | null;
   sku_code?: string | null;

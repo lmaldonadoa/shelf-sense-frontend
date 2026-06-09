@@ -29,6 +29,14 @@ import type {
   RecentUpload,
   ReprocessByCodeRequest,
   ReprocessByCodeResponse,
+  PromotionsJobRerunRequest,
+  PromotionsJobRerunResponse,
+  PromotionsBulkRerunRequest,
+  PromotionsBulkRerunResponse,
+  JobCompareResponse,
+  JobDeleteRequest,
+  BulkJobDeleteRequest,
+  BulkJobDeleteResponse,
   SupportMemoryItem,
   SemanticKnowledgeEntry,
   SemanticKnowledgeListResponse,
@@ -3823,6 +3831,93 @@ export const ocrApi = {
       "No se pudo resolver item de curaduría Shelf",
     );
     return (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
+  },
+
+  // ---------------------------------------------------------------------------
+  // Promotions: rerun, bulk rerun, compare, delete
+  // ---------------------------------------------------------------------------
+
+  rerunPromotionsJob: async (
+    accountName: string,
+    jobId: string,
+    payload: PromotionsJobRerunRequest,
+  ): Promise<PromotionsJobRerunResponse> => {
+    const body = await request(
+      `/v1/accounts/${encodeURIComponent(accountName)}/jobs/${encodeURIComponent(jobId)}/rerun`,
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) },
+      "No se pudo reejecutar el job de promociones",
+      30000,
+    );
+    return (body && typeof body === "object" ? body : {}) as PromotionsJobRerunResponse;
+  },
+
+  bulkRerunPromotionsJobs: async (
+    accountName: string,
+    payload: PromotionsBulkRerunRequest,
+  ): Promise<PromotionsBulkRerunResponse> => {
+    const body = await request(
+      `/v1/accounts/${encodeURIComponent(accountName)}/jobs/bulk-rerun`,
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) },
+      "No se pudo reejecutar los jobs de promociones",
+      60000,
+    );
+    return (body && typeof body === "object" ? body : {}) as PromotionsBulkRerunResponse;
+  },
+
+  compareJobs: async (
+    accountName: string,
+    jobIdA: string,
+    jobIdB: string,
+  ): Promise<JobCompareResponse> => {
+    const body = await request(
+      `/v1/accounts/${encodeURIComponent(accountName)}/jobs/${encodeURIComponent(jobIdA)}/compare/${encodeURIComponent(jobIdB)}`,
+      { method: "GET" },
+      "No se pudo comparar jobs",
+    );
+    return (body && typeof body === "object" ? body : {}) as JobCompareResponse;
+  },
+
+  deletePromotionsJob: async (
+    accountName: string,
+    jobId: string,
+    payload: JobDeleteRequest,
+  ): Promise<Record<string, unknown>> => {
+    const body = await request(
+      `/v1/accounts/${encodeURIComponent(accountName)}/jobs/${encodeURIComponent(jobId)}`,
+      { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) },
+      "No se pudo eliminar el job",
+    );
+    return (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
+  },
+
+  bulkDeletePromotionsJobs: async (
+    accountName: string,
+    payload: BulkJobDeleteRequest,
+  ): Promise<BulkJobDeleteResponse> => {
+    const body = await request(
+      `/v1/accounts/${encodeURIComponent(accountName)}/jobs/bulk-delete`,
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) },
+      "No se pudo eliminar los jobs",
+    );
+    return (body && typeof body === "object" ? body : {}) as BulkJobDeleteResponse;
+  },
+
+  deleteShelfJob: async (jobId: string, payload: JobDeleteRequest): Promise<Record<string, unknown>> => {
+    const body = await request(
+      `/v1/shelf/jobs/${encodeURIComponent(jobId)}`,
+      { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) },
+      "No se pudo eliminar el shelf job",
+    );
+    return (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
+  },
+
+  bulkDeleteShelfJobs: async (payload: BulkJobDeleteRequest): Promise<BulkJobDeleteResponse> => {
+    const body = await request(
+      "/v1/shelf/jobs/bulk-delete",
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) },
+      "No se pudo eliminar los shelf jobs",
+    );
+    return (body && typeof body === "object" ? body : {}) as BulkJobDeleteResponse;
   },
 
   getAnnotatedDownloadUrl: (jobId: string, imageId: number): string => {

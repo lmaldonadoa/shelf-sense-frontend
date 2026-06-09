@@ -3,10 +3,10 @@
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useQuery } from "@tanstack/react-query";
-import { Copy, ExternalLink, Loader2, RefreshCcw, ShieldAlert } from "lucide-react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Copy, ExternalLink, Loader2, RefreshCcw, RotateCcw, ShieldAlert, Trash2 } from "lucide-react";
 import { toast } from "sonner";
-import { getJobId, HttpError, ocrApi } from "@/lib/ocrApi";
+import { getJobId, HttpError, isFinalJobStatus, ocrApi } from "@/lib/ocrApi";
 import type { JobRow, JobStatus } from "@/types/ocr-api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -94,9 +94,12 @@ function isInsideRange(row: JobRow, range: RangeValue): boolean {
 
 export function AccountJobsHistoryPage({ account }: AccountJobsHistoryPageProps) {
   const router = useRouter();
+  const queryClient = useQueryClient();
   const searchParams = useSearchParams();
   const [openingJobId, setOpeningJobId] = useState<string | null>(null);
   const [accountFromParams] = useState(account);
+  // confirmingDeleteId: jobId waiting for second click to confirm delete
+  const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(null);
 
   const [searchText, setSearchText] = useState(searchParams.get("q") ?? "");
   const [statusFilter, setStatusFilter] = useState(searchParams.get("status") ?? "all");
@@ -145,6 +148,53 @@ export function AccountJobsHistoryPage({ account }: AccountJobsHistoryPageProps)
       .filter((row) => isInsideRange(row, rangeFilter))
       .sort((a, b) => parseDate(b.created_at || b.updated_at) - parseDate(a.created_at || a.updated_at));
   }, [accountFromParams, rangeFilter, recentJobsQuery.data, searchText, statusFilter]);
+
+  const rerunMutation = useMutation({
+    mutationFn: async ({ jobId, module }: { jobId: string; module: string }) => {
+      if (module === "shelf_recognition") {
+        return ocrApi.rerunShelfJob(jobId, {});
+      }
+      return ocrApi.rerunPromotionsJob(accountFromParams, jobId, { mode: "new" });
+    },
+    onSuccess: (data, { module }) => {
+      const newId = (data as Record<string, unknown>).new_job_id as string | undefined;
+      toast.success("Job reencolado", {
+        description: newId ? `Nuevo job: ${newId}` : "El job fue reiniciado.",
+        action: newId
+          ? {
+              label: "Abrir",
+              onClick: () => {
+                const basePath = module === "shelf_recognition" ? `/accounts/${encodeURIComponent(accountFromParams)}/shelf` : `/accounts/${encodeURIComponent(accountFromParams)}/jobs`;
+                router.push(`${basePath}/${encodeURIComponent(newId)}`);
+              },
+            }
+          : undefined,
+      });
+      void queryClient.invalidateQueries({ queryKey: ["account-jobs-recent", accountFromParams] });
+    },
+    onError: (err) => {
+      toast.error("No se pudo reejecutar", { description: err instanceof HttpError ? err.message : "Error inesperado" });
+    },
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: async ({ jobId, module }: { jobId: string; module: string }) => {
+      const payload = { delete_local_files: true, delete_mysql: true, dry_run: false, confirm: "DELETE_JOB" };
+      if (module === "shelf_recognition") {
+        return ocrApi.deleteShelfJob(jobId, payload);
+      }
+      return ocrApi.deletePromotionsJob(accountFromParams, jobId, payload);
+    },
+    onSuccess: (_, { jobId }) => {
+      toast.success("Job eliminado", { description: jobId });
+      setConfirmingDeleteId(null);
+      void queryClient.invalidateQueries({ queryKey: ["account-jobs-recent", accountFromParams] });
+    },
+    onError: (err) => {
+      toast.error("No se pudo eliminar", { description: err instanceof HttpError ? err.message : "Error inesperado" });
+      setConfirmingDeleteId(null);
+    },
+  });
 
   async function openJob(row: JobRow) {
     const safeJobId = getJobId(row);
@@ -299,24 +349,74 @@ export function AccountJobsHistoryPage({ account }: AccountJobsHistoryPageProps)
                         <TableCell>{row.processed_images}</TableCell>
                         <TableCell>{row.failed_images}</TableCell>
                         <TableCell>{formatDuration(row.started_at ?? row.created_at, row.finished_at)}</TableCell>
-                        <TableCell className="space-x-2">
-                          <Button size="sm" onClick={() => void openJob(row)} disabled={openingJobId === safeJobId || !safeJobId}>
-                            {openingJobId === safeJobId ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <ExternalLink className="mr-2 h-4 w-4" />}
-                            Abrir
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            onClick={async () => {
-                              if (!safeJobId) return;
-                              await navigator.clipboard.writeText(safeJobId);
-                              toast.success("ID copiado");
-                            }}
-                            disabled={!safeJobId}
-                          >
-                            <Copy className="mr-2 h-4 w-4" />
-                            Copiar ID
-                          </Button>
+                        <TableCell>
+                          <div className="flex flex-wrap gap-1.5">
+                            {/* Abrir */}
+                            <Button size="sm" onClick={() => void openJob(row)} disabled={openingJobId === safeJobId || !safeJobId}>
+                              {openingJobId === safeJobId ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ExternalLink className="h-3.5 w-3.5" />}
+                              <span className="ml-1.5">Abrir</span>
+                            </Button>
+                            {/* Copiar ID */}
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={async () => {
+                                if (!safeJobId) return;
+                                await navigator.clipboard.writeText(safeJobId);
+                                toast.success("ID copiado");
+                              }}
+                              disabled={!safeJobId}
+                            >
+                              <Copy className="h-3.5 w-3.5" />
+                            </Button>
+                            {/* Reejecutar — solo para jobs terminados de módulos soportados */}
+                            {safeJobId &&
+                              isFinalJobStatus(row.status) &&
+                              (typeMeta.detail === "promotions" || typeMeta.detail === "shelf_recognition") && (
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  className="border-blue-500/30 text-blue-300 hover:bg-blue-500/10"
+                                  onClick={() => rerunMutation.mutate({ jobId: safeJobId, module: typeMeta.detail })}
+                                  disabled={rerunMutation.isPending && rerunMutation.variables?.jobId === safeJobId}
+                                  title="Reejecutar con los mismos inputs (crea nuevo job)"
+                                >
+                                  {rerunMutation.isPending && rerunMutation.variables?.jobId === safeJobId ? (
+                                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                  ) : (
+                                    <RotateCcw className="h-3.5 w-3.5" />
+                                  )}
+                                </Button>
+                              )}
+                            {/* Eliminar — doble click para confirmar */}
+                            {safeJobId && isFinalJobStatus(row.status) && (
+                              confirmingDeleteId === safeJobId ? (
+                                <div className="flex gap-1">
+                                  <Button
+                                    size="sm"
+                                    variant="destructive"
+                                    onClick={() => deleteMutation.mutate({ jobId: safeJobId, module: typeMeta.detail })}
+                                    disabled={deleteMutation.isPending}
+                                  >
+                                    {deleteMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Confirmar"}
+                                  </Button>
+                                  <Button size="sm" variant="outline" onClick={() => setConfirmingDeleteId(null)}>
+                                    Cancelar
+                                  </Button>
+                                </div>
+                              ) : (
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  className="border-red-500/30 text-red-400 hover:bg-red-500/10"
+                                  onClick={() => setConfirmingDeleteId(safeJobId)}
+                                  title="Eliminar job (pide confirmación)"
+                                >
+                                  <Trash2 className="h-3.5 w-3.5" />
+                                </Button>
+                              )
+                            )}
+                          </div>
                         </TableCell>
                       </TableRow>
                     );
