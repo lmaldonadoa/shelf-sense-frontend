@@ -15,6 +15,7 @@ import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
 import { UploadPanel } from "@/components/jobs/upload-panel";
+import { ShelfSkuUploadSafeguard } from "@/components/shelf/shelf-sku-upload-safeguard";
 
 type Props = { account: string };
 type Tab = "jobs" | "results" | "skus" | "assets" | "index" | "review";
@@ -813,6 +814,8 @@ export function AccountShelfPage({ account }: Props) {
   });
   const [bulkJson, setBulkJson] = useState('[\n  {\n    "sku_code": "SKU001",\n    "sku_name": "Producto 1"\n  }\n]');
   const [bulkPreview, setBulkPreview] = useState<Record<string, unknown>[]>([]);
+  const [bulkDataForUpload, setBulkDataForUpload] = useState<Record<string, unknown>[]>([]);
+  const [showBulkUploadSafeguard, setShowBulkUploadSafeguard] = useState(false);
   const [selectedSkuId, setSelectedSkuId] = useState("");
   const [skuImageJson, setSkuImageJson] = useState('{\n  "image_file_id": "file_abc123"\n}');
   const [selectedSkuImageFiles, setSelectedSkuImageFiles] = useState<File[]>([]);
@@ -5184,11 +5187,12 @@ export function AccountShelfPage({ account }: Props) {
                       toast.error("No hay filas validas para crear.");
                       return;
                     }
-                    bulkCreateMutation.mutate(rows);
+                    setBulkDataForUpload(rows);
+                    setShowBulkUploadSafeguard(true);
                   }}
-                  disabled={bulkCreateMutation.isPending}
+                  disabled={bulkCreateMutation.isPending || showBulkUploadSafeguard}
                 >
-                  Crear lote
+                  Crear lote (Protegido)
                 </Button>
               </div>
               {bulkPreview.length ? (
@@ -5199,6 +5203,24 @@ export function AccountShelfPage({ account }: Props) {
                   </pre>
                 </div>
               ) : null}
+
+              {showBulkUploadSafeguard && bulkDataForUpload.length > 0 && (
+                <div className="mt-4">
+                  <ShelfSkuUploadSafeguard
+                    account={account}
+                    bulkData={bulkDataForUpload}
+                    onUploadSuccess={() => {
+                      setShowBulkUploadSafeguard(false);
+                      setBulkJson("");
+                      setBulkPreview([]);
+                      setBulkDataForUpload([]);
+                    }}
+                  />
+                  <Button variant="outline" className="mt-3" onClick={() => setShowBulkUploadSafeguard(false)}>
+                    Cancelar
+                  </Button>
+                </div>
+              )}
             </div>
 
             <div className="rounded-lg border border-white/10 bg-black/20 p-3">

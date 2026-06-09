@@ -60,9 +60,46 @@ export type TextEnrichmentConfig = {
   semantic_rag?: {
     enabled?: boolean;
     limit?: number;
+    rollout_mode?: "apply" | "shadow" | "disabled" | string;
+    [key: string]: unknown;
+  };
+  semantic_scope_guardrails?: {
+    enabled?: boolean;
+    [key: string]: unknown;
+  };
+  structured_shadow?: {
+    enabled?: boolean;
+    use_json_schema?: boolean;
+    temperature?: number;
+    timeout?: number;
+    max_products?: number;
+    include_raw_response?: boolean;
+    [key: string]: unknown;
+  };
+  measure_noise_rules?: {
+    enabled?: boolean;
+    chains?: string[];
+    [key: string]: unknown;
+  };
+  size_plausibility_guardrail?: {
+    enabled?: boolean;
+    subcategory_rules_extra?: Array<{
+      keywords: string[];
+      unit: string;
+      min: number;
+      max: number;
+      note?: string;
+    }>;
     [key: string]: unknown;
   };
   normalization_map?: Record<string, string>;
+  conditional_aliases?: Array<{
+    alias: string;
+    canonical: string;
+    chain_whitelist?: string[];
+    target_keywords?: string[];
+    is_active?: number;
+  }>;
   [key: string]: unknown;
 };
 

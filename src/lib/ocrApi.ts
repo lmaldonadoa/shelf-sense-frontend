@@ -5,6 +5,7 @@ import type {
   AliasRow,
   ConfigListResponse,
   CreateAccountConfigRequest,
+  PipelineConfig,
   CreateJobRequest,
   CreateJobResponse,
   JobEvent,
@@ -1486,6 +1487,62 @@ export const ocrApi = {
 
   activateAccountConfig: async (accountName: string, configId: string | number) => {
     return ocrApi.activateConfig(accountName, configId);
+  },
+
+  updatePipelineConfig: async (accountName: string, config: PipelineConfig): Promise<ActiveConfigResponse> => {
+    // Obtener config actual para usar su versión
+    const currentConfig = await ocrApi.getActiveConfig(accountName);
+    let nextVersion = "next"; // Default: let backend auto-increment
+
+    // Si existe versión actual, intentar incrementarla
+    if (currentConfig?.config && typeof currentConfig.config === "object") {
+      const rawConfig = currentConfig.config as Record<string, unknown>;
+      const version = rawConfig.version;
+
+      // Intentar parsear versión actual y incrementar
+      if (typeof version === "number") {
+        nextVersion = String(version + 1);
+      } else if (typeof version === "string") {
+        // Si es "vX", extraer número y incrementar
+        const match = version.match(/^v(\d+)$/);
+        if (match) {
+          nextVersion = `v${parseInt(match[1], 10) + 1}`;
+        } else if (!isNaN(Number(version))) {
+          // Si es un string numérico, incrementar
+          nextVersion = String(Number(version) + 1);
+        } else {
+          // Fallback a "next" para auto-incrementar
+          nextVersion = "next";
+        }
+      }
+    }
+
+    const payload: CreateAccountConfigRequest = {
+      name: "default",
+      version: nextVersion,
+      is_active: true,
+      config: config as Record<string, unknown>,
+    };
+    return ocrApi.upsertConfig(accountName, payload);
+  },
+
+  getRagEffectiveness: async (
+    accountName: string,
+    params?: { period_days?: number },
+  ): Promise<{ account_name: string; period_days: number; rules: unknown[] }> => {
+    const query = new URLSearchParams();
+    if (typeof params?.period_days === "number") query.set("period_days", String(params.period_days));
+    const body = await request(
+      `/v1/accounts/${encodeURIComponent(accountName)}/quality/rag-effectiveness${query.toString() ? `?${query.toString()}` : ""}`,
+      { method: "GET" },
+      "No se pudo consultar efectividad de RAG",
+    );
+    const data = (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
+    return {
+      account_name: typeof data.account_name === "string" ? data.account_name : accountName,
+      period_days: Number(data.period_days ?? 30) || 30,
+      rules: Array.isArray(data.rules) ? data.rules : [],
+    };
   },
 
   listAliases: async (accountName: string, scope = "product"): Promise<AliasListResponse> => {
