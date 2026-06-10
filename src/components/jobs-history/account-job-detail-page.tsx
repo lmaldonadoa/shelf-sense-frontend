@@ -16,6 +16,13 @@ import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { MarkdownReportContent, MdReportDialog, fetchMarkdownReport } from "@/components/ui/md-report-dialog";
+import { JobArtifactsView } from "@/components/jobs-history/job-artifacts-view";
+import { JobImageContextBar } from "@/components/jobs-history/job-image-context-bar";
+import { JobDetailViewKey, JobViewTabs } from "@/components/jobs-history/job-view-tabs";
+import { JobVisualSectionNav } from "@/components/jobs-history/job-visual-section-nav";
+import { JsonDebugBlock } from "@/components/jobs-history/json-debug-block";
+import { OcrCompareImages } from "@/components/jobs-history/ocr-compare-images";
+import { OcrVariantRows, SupportMemorySummaryRows } from "@/components/jobs-history/ocr-variant-rows";
 
 type AccountJobDetailPageProps = {
   account?: string;
@@ -356,7 +363,7 @@ export function AccountJobDetailPage({ account, jobId }: AccountJobDetailPagePro
   const [resultsPendingMessage, setResultsPendingMessage] = useState<string | null>(null);
   const [memoryLabelFilter, setMemoryLabelFilter] = useState<string>("all");
   const [postCompleteRefreshes, setPostCompleteRefreshes] = useState(0);
-  const [activeView, setActiveView] = useState<"overview" | "visual" | "debug_ocr" | "products" | "artifacts">("overview");
+  const [activeView, setActiveView] = useState<JobDetailViewKey>("overview");
   const [showPrimaryCompare, setShowPrimaryCompare] = useState<Record<string, boolean>>({});
   const [showSupportCompare, setShowSupportCompare] = useState<Record<string, boolean>>({});
   const [primaryPreprocessView, setPrimaryPreprocessView] = useState<Record<string, "active" | "shadow">>({});
@@ -625,10 +632,17 @@ export function AccountJobDetailPage({ account, jobId }: AccountJobDetailPagePro
     }
   }, [jobId, jobQuery.data, normalizedUserResponse, resultsQuery.data]);
 
-  const selectedPreviewUrl =
-    selectedImage?.annotated_image_url ??
-    selectedImage?.annotated_download_url ??
-    null;
+  const selectedPreviewUrl = useMemo(
+    () => resolveArtifactPreviewUrl(selectedImage?.annotated_image_url ?? selectedImage?.annotated_download_url ?? null),
+    [selectedImage?.annotated_download_url, selectedImage?.annotated_image_url],
+  );
+
+  const selectedAnnotatedUrl = useMemo(
+    () => resolveArtifactPreviewUrl(selectedImage?.annotated_image_url ?? selectedImage?.annotated_download_url ?? null),
+    [selectedImage?.annotated_download_url, selectedImage?.annotated_image_url],
+  );
+
+  const showImageContextBar = activeView === "visual" || activeView === "debug_ocr" || activeView === "artifacts";
 
   const missingArtifactUrls = useMemo(() => {
     const masterMissing = !resultsQuery.data?.master_html_url || !resultsQuery.data?.master_json_url || !resultsQuery.data?.excel_url;
@@ -692,8 +706,8 @@ export function AccountJobDetailPage({ account, jobId }: AccountJobDetailPagePro
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="space-y-1">
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+        <div className="min-w-0 space-y-1">
           <p className="text-xs text-slate-400">
             <Link href={`/accounts/${encodeURIComponent(resolvedAccount)}/jobs`} className="hover:text-slate-200">Cuenta {resolvedAccount}</Link>
             {" > "}
@@ -704,30 +718,43 @@ export function AccountJobDetailPage({ account, jobId }: AccountJobDetailPagePro
           <h1 className="font-heading text-2xl text-white">Visor Operativo de Job OCR</h1>
           <p className="text-xs text-slate-300">Promociones es la fuente principal. Etiquetas/Productos se usan como soporte y trazabilidad.</p>
         </div>
-        <div className="flex flex-wrap gap-2">
-          {[
-            { key: "overview", label: "Resumen" },
-            { key: "visual", label: "Visual/OCR" },
-            { key: "debug_ocr", label: "Debug OCR / Ensemble" },
-            { key: "products", label: "Productos" },
-            { key: "artifacts", label: "Artefactos" },
-          ].map((tab) => (
-            <Button
-              key={tab.key}
-              size="sm"
-              variant={activeView === tab.key ? "default" : "outline"}
-              onClick={() => setActiveView(tab.key as typeof activeView)}
-            >
-              {tab.label}
-            </Button>
-          ))}
-          <Button variant="outline" onClick={() => void navigator.clipboard.writeText(jobId).then(() => toast.success("ID de job copiado"))}>Copiar ID Job</Button>
-          <Button variant="outline" onClick={() => void jobQuery.refetch()} disabled={jobQuery.isFetching}>
-            {jobQuery.isFetching ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCcw className="mr-2 h-4 w-4" />}
-            Reintentar resumen
-          </Button>
-        </div>
+        <JobViewTabs
+          activeView={activeView}
+          onViewChange={setActiveView}
+          secondaryActions={(
+            <>
+              <Button variant="outline" onClick={() => void navigator.clipboard.writeText(jobId).then(() => toast.success("ID de job copiado"))}>
+                Copiar ID Job
+              </Button>
+              <Button variant="outline" onClick={() => void jobQuery.refetch()} disabled={jobQuery.isFetching}>
+                {jobQuery.isFetching ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCcw className="mr-2 h-4 w-4" />}
+                Reintentar resumen
+              </Button>
+            </>
+          )}
+        />
       </div>
+
+      {showImageContextBar ? (
+        <JobImageContextBar
+          images={images}
+          selectedImage={selectedImage}
+          onSelectImage={setSelectedImage}
+          annotatedUrl={selectedAnnotatedUrl}
+          showMdReport={Boolean(selectedImage?.result_md_url)}
+          onOpenMdReport={
+            selectedImage?.result_md_url
+              ? () => openMdDialog(
+                `Reporte OCR/LLM · ${selectedImage.original_name ?? selectedImage.image_name ?? selectedImage.id}`,
+                selectedImage.result_md_url!,
+                `${jobId}_${selectedImage.id}_ocr_debug.md`,
+              )
+              : undefined
+          }
+        />
+      ) : null}
+
+      {activeView === "visual" ? <JobVisualSectionNav /> : null}
 
       {activeView === "overview" ? (
       <div className="grid gap-6 xl:grid-cols-2">
@@ -877,7 +904,7 @@ export function AccountJobDetailPage({ account, jobId }: AccountJobDetailPagePro
       ) : null}
 
       {activeView === "visual" ? (
-      <Card className="border-cyan-300/25 bg-cyan-500/10 backdrop-blur">
+      <Card id="job-visual-chain" className="scroll-mt-32 border-cyan-300/25 bg-cyan-500/10 backdrop-blur">
         <CardHeader><CardTitle className="text-base">Diagnóstico de cadena</CardTitle></CardHeader>
         <CardContent className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
           <div className="rounded-lg border border-white/10 bg-black/20 p-3"><p className="text-xs text-muted-foreground">cadena_solicitada</p><p className="text-sm font-semibold">{String(chainDiagnostics.requested ?? "-")}</p></div>
@@ -980,7 +1007,7 @@ export function AccountJobDetailPage({ account, jobId }: AccountJobDetailPagePro
       ) : null}
 
       {activeView === "visual" ? (
-      <Card className="border-white/10 bg-white/5 backdrop-blur">
+      <Card id="job-visual-detection" className="scroll-mt-32 border-white/10 bg-white/5 backdrop-blur">
         <CardHeader><CardTitle>Deteccion visual</CardTitle></CardHeader>
         <CardContent className="space-y-4">
           {!selectedImage ? (
@@ -996,28 +1023,42 @@ export function AccountJobDetailPage({ account, jobId }: AccountJobDetailPagePro
               {!combinedDetections.length ? (
                 <p className="text-sm text-muted-foreground">Sin boxes registrados para esta imagen.</p>
               ) : (
-                <div className="overflow-x-auto">
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead>Fuente</TableHead>
-                        <TableHead>Label</TableHead>
-                        <TableHead>Conf</TableHead>
-                        <TableHead>Box</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {combinedDetections.map((row, idx) => (
-                        <TableRow key={`det-${idx}-${row.label}`}>
-                          <TableCell><Badge variant={row.source === "PRIMARY" ? "default" : "secondary"}>{row.source}</Badge></TableCell>
-                          <TableCell>{row.label}</TableCell>
-                          <TableCell>{row.conf.toFixed(4)}</TableCell>
-                          <TableCell>[{row.box.join(", ")}]</TableCell>
+                <>
+                  <div className="space-y-2 md:hidden">
+                    {combinedDetections.map((row, idx) => (
+                      <div key={`det-mobile-${idx}-${row.label}`} className="rounded-lg border border-white/10 bg-black/20 p-3 text-sm">
+                        <div className="mb-2 flex flex-wrap items-center gap-2">
+                          <Badge variant={row.source === "PRIMARY" ? "default" : "secondary"}>{row.source}</Badge>
+                          <span className="font-semibold text-white">{row.label}</span>
+                        </div>
+                        <p className="text-xs text-slate-300">conf: {row.conf.toFixed(4)}</p>
+                        <p className="mt-1 font-mono text-xs text-slate-400">[{row.box.join(", ")}]</p>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="hidden overflow-x-auto md:block">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>Fuente</TableHead>
+                          <TableHead>Label</TableHead>
+                          <TableHead>Conf</TableHead>
+                          <TableHead>Box</TableHead>
                         </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
-                </div>
+                      </TableHeader>
+                      <TableBody>
+                        {combinedDetections.map((row, idx) => (
+                          <TableRow key={`det-${idx}-${row.label}`}>
+                            <TableCell><Badge variant={row.source === "PRIMARY" ? "default" : "secondary"}>{row.source}</Badge></TableCell>
+                            <TableCell>{row.label}</TableCell>
+                            <TableCell>{row.conf.toFixed(4)}</TableCell>
+                            <TableCell>[{row.box.join(", ")}]</TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                </>
               )}
             </>
           )}
@@ -1026,7 +1067,7 @@ export function AccountJobDetailPage({ account, jobId }: AccountJobDetailPagePro
       ) : null}
 
       {activeView === "visual" ? (
-      <Card className="border-white/10 bg-white/5 backdrop-blur">
+      <Card id="job-visual-primary-debug" className="scroll-mt-32 border-white/10 bg-white/5 backdrop-blur">
         <CardHeader><CardTitle>Primary crop debug</CardTitle></CardHeader>
         <CardContent>
           {!selectedImage ? (
@@ -1034,16 +1075,14 @@ export function AccountJobDetailPage({ account, jobId }: AccountJobDetailPagePro
           ) : !(artifacts.primaryCropDebug.length) ? (
             <p className="text-sm text-muted-foreground">Sin primary_crop_debug en este job/imagen.</p>
           ) : (
-            <pre className="max-h-80 overflow-auto rounded-md border border-white/10 bg-black/25 p-3 text-xs">
-              {JSON.stringify(artifacts.primaryCropDebug, null, 2)}
-            </pre>
+            <JsonDebugBlock label="primary_crop_debug" value={artifacts.primaryCropDebug} defaultOpen />
           )}
         </CardContent>
       </Card>
       ) : null}
 
       {activeView === "visual" ? (
-      <Card className="border-white/10 bg-white/5 backdrop-blur">
+      <Card id="job-visual-ocr-ab" className="scroll-mt-32 border-white/10 bg-white/5 backdrop-blur">
         <CardHeader><CardTitle>OCR Preprocess A/B por crop</CardTitle></CardHeader>
         <CardContent className="space-y-4">
           {!selectedImage ? (
@@ -1154,91 +1193,33 @@ export function AccountJobDetailPage({ account, jobId }: AccountJobDetailPagePro
                       </div>
                     ) : null}
 
-                    <div className={compareEnabled ? "grid gap-3 lg:grid-cols-2" : "grid gap-3"}>
-                      <div className="space-y-2">
-                        <p className="text-xs font-semibold tracking-wide text-slate-300">Vista de referencia (original)</p>
-                        {cropPreviewUrl ? (
-                          // eslint-disable-next-line @next/next/no-img-element
-                          <img src={cropPreviewUrl} alt={crop.crop_filename ?? crop.crop_id} className="h-44 w-full rounded-md border border-white/10 object-contain bg-black/30" />
-                        ) : (
-                          <div className="flex h-44 items-center justify-center rounded-md border border-dashed border-white/15 text-xs text-muted-foreground">Sin miniatura original</div>
-                        )}
-                      </div>
-                      {compareEnabled ? (
-                        <div className="space-y-2">
-                          <p className="text-xs font-semibold tracking-wide text-slate-300">Vista usada para OCR ({ocrUsedLabel})</p>
-                          {processedPreviewUrl ? (
-                            // eslint-disable-next-line @next/next/no-img-element
-                            <img src={processedPreviewUrl} alt={`processed-${crop.crop_id}`} className="h-44 w-full rounded-md border border-cyan-300/30 object-contain bg-black/30" />
-                          ) : (
-                            <div className="flex h-44 items-center justify-center rounded-md border border-dashed border-white/15 text-xs text-muted-foreground">No hay artefacto de variante guardado</div>
-                          )}
-                        </div>
-                      ) : null}
-                    </div>
+                    <OcrCompareImages
+                      compareEnabled={compareEnabled}
+                      originalUrl={cropPreviewUrl}
+                      processedUrl={processedPreviewUrl}
+                      processedLabel={`Vista usada para OCR (${ocrUsedLabel})`}
+                      originalAlt={crop.crop_filename ?? crop.crop_id}
+                      processedAlt={`processed-${crop.crop_id}`}
+                    />
 
                     {!displayedVariants.length ? (
                       <p className="text-xs text-muted-foreground">
                         {preprocessMode === "shadow" ? "No hay variantes shadow en este crop." : "No hay variantes OCR activas en este crop."}
                       </p>
                     ) : (
-                      <div className="overflow-x-auto">
-                        <Table>
-                          <TableHeader>
-                            <TableRow>
-                              <TableHead>variant</TableHead>
-                              <TableHead>mode</TableHead>
-                              <TableHead>score</TableHead>
-                              <TableHead>chars</TableHead>
-                              <TableHead>elapsed_ms</TableHead>
-                              <TableHead>quality</TableHead>
-                              <TableHead>skip</TableHead>
-                              <TableHead>preview</TableHead>
-                              <TableHead>artefacto</TableHead>
-                            </TableRow>
-                          </TableHeader>
-                          <TableBody>
-                            {displayedVariants.map((row, idx) => {
-                              const artifact = getVariantArtifactUrl(row);
-                              const isWinner = row?.variant === displayedWinner;
-                              return (
-                                <TableRow key={`variant-${crop.crop_id}-${idx}`}>
-                                  <TableCell>
-                                    <div className="flex items-center gap-2">
-                                      <span>{row?.variant ?? "-"}</span>
-                                      {isWinner ? <Badge>{preprocessMode === "shadow" ? "mejor shadow" : "usada por pipeline"}</Badge> : null}
-                                      {row?.shadow_only ? <Badge variant="outline">shadow_only</Badge> : null}
-                                    </div>
-                                  </TableCell>
-                                  <TableCell>{row?.mode ?? (preprocessMode === "shadow" ? "shadow" : "active")}</TableCell>
-                                  <TableCell>{typeof row?.score === "number" ? row.score.toFixed(4) : "-"}</TableCell>
-                                  <TableCell>{typeof row?.chars === "number" ? row.chars : "-"}</TableCell>
-                                  <TableCell>{typeof row?.elapsed_ms === "number" ? row.elapsed_ms : "-"}</TableCell>
-                                  <TableCell className="max-w-72 truncate" title={formatQualityMetrics(row?.quality_metrics)}>{formatQualityMetrics(row?.quality_metrics)}</TableCell>
-                                  <TableCell className="max-w-72 truncate" title={typeof row?.ocr_skipped_reason === "string" ? row.ocr_skipped_reason : ""}>{typeof row?.ocr_skipped_reason === "string" ? row.ocr_skipped_reason : "-"}</TableCell>
-                                  <TableCell className="max-w-80">
-                                    <div className="space-y-2">
-                                      <p className="truncate" title={typeof row?.raw_text_preview === "string" ? row.raw_text_preview : ""}>{typeof row?.raw_text_preview === "string" ? row.raw_text_preview : "-"}</p>
-                                      <Button
-                                        size="sm"
-                                        variant="outline"
-                                        onClick={() => setVariantPreviewModal({
-                                          title: `Crop ${crop.crop_id}`,
-                                          variant: row?.variant ?? "-",
-                                          preview: typeof row?.raw_text_preview === "string" ? row.raw_text_preview : "",
-                                        })}
-                                      >
-                                        Ver texto completo
-                                      </Button>
-                                    </div>
-                                  </TableCell>
-                                  <TableCell>{artifact ? <a href={artifact} target="_blank" rel="noreferrer" className="text-cyan-200 underline">Ver</a> : <span className="text-muted-foreground">sin artefacto</span>}</TableCell>
-                                </TableRow>
-                              );
-                            })}
-                          </TableBody>
-                        </Table>
-                      </div>
+                      <OcrVariantRows
+                        variants={displayedVariants}
+                        displayedWinner={displayedWinner}
+                        preprocessMode={preprocessMode}
+                        cropLabel={crop.crop_id}
+                        formatQualityMetrics={formatQualityMetrics}
+                        getArtifactUrl={getVariantArtifactUrl}
+                        onPreview={(variant, preview) => setVariantPreviewModal({
+                          title: `Crop ${crop.crop_id}`,
+                          variant,
+                          preview,
+                        })}
+                      />
                     )}
                   </div>
                 );
@@ -1250,7 +1231,7 @@ export function AccountJobDetailPage({ account, jobId }: AccountJobDetailPagePro
       ) : null}
 
       {activeView === "visual" ? (
-      <Card className="border-white/10 bg-white/5 backdrop-blur">
+      <Card id="job-visual-primary-crops" className="scroll-mt-32 border-white/10 bg-white/5 backdrop-blur">
         <CardHeader><CardTitle>Recortes PRIMARY (promociones)</CardTitle></CardHeader>
         <CardContent className="space-y-4">
           {!selectedImage ? (
@@ -1333,8 +1314,8 @@ export function AccountJobDetailPage({ account, jobId }: AccountJobDetailPagePro
       ) : null}
 
       {activeView === "visual" ? (
-      <Card className="border-white/10 bg-white/5 backdrop-blur">
-        <CardHeader className="flex flex-row items-center justify-between">
+      <Card id="job-visual-support-memory" className="scroll-mt-32 border-white/10 bg-white/5 backdrop-blur">
+        <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <CardTitle>Memoria de soporte</CardTitle>
           <Button size="sm" variant="outline" onClick={() => {
             if (!selectedImage) return;
@@ -1373,33 +1354,20 @@ export function AccountJobDetailPage({ account, jobId }: AccountJobDetailPagePro
                 <p className="text-sm text-muted-foreground">No hay memoria para el filtro seleccionado.</p>
               ) : (
                 <div className="space-y-4">
-                  <div className="overflow-x-auto">
-                    <Table>
-                      <TableHeader>
-                        <TableRow>
-                          <TableHead>crop</TableHead>
-                          <TableHead>memory_label</TableHead>
-                          <TableHead>label/conf</TableHead>
-                          <TableHead>raw_text</TableHead>
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        {filteredSupportMemory.map((item, idx) => (
-                          <TableRow key={`memory-${idx}-${item.crop_filename ?? "crop"}`}>
-                            <TableCell className="max-w-52 truncate">{item.crop_filename ?? item.crop_id ?? "-"}</TableCell>
-                            <TableCell>{item.memory_label ?? "-"}</TableCell>
-                            <TableCell>{item.label ?? "-"} / {typeof item.conf === "number" ? item.conf.toFixed(4) : "-"}</TableCell>
-                            <TableCell className="max-w-96">
-                              <details>
-                                <summary className="cursor-pointer text-cyan-200">Ver texto OCR</summary>
-                                <pre className="mt-2 max-h-36 overflow-auto rounded-md border border-white/10 bg-black/30 p-2 text-xs">{item.raw_text_full ?? item.raw_text ?? ""}</pre>
-                              </details>
-                            </TableCell>
-                          </TableRow>
-                        ))}
-                      </TableBody>
-                    </Table>
-                  </div>
+                  <SupportMemorySummaryRows
+                    rows={filteredSupportMemory.map((item, idx) => ({
+                      key: `memory-${idx}-${item.crop_filename ?? "crop"}`,
+                      crop: item.crop_filename ?? item.crop_id ?? "-",
+                      memoryLabel: item.memory_label ?? "-",
+                      labelConf: `${item.label ?? "-"} / ${typeof item.conf === "number" ? item.conf.toFixed(4) : "-"}`,
+                      rawText: (
+                        <details>
+                          <summary className="cursor-pointer text-cyan-200">Ver texto OCR</summary>
+                          <pre className="mt-2 max-h-36 overflow-auto rounded-md border border-white/10 bg-black/30 p-2 text-xs">{item.raw_text_full ?? item.raw_text ?? ""}</pre>
+                        </details>
+                      ),
+                    }))}
+                  />
 
                   <div className="space-y-3">
                     {filteredSupportMemory.map((item, idx) => {
@@ -1461,78 +1429,31 @@ export function AccountJobDetailPage({ account, jobId }: AccountJobDetailPagePro
                               <Badge variant="secondary">Shadow habría superado la variante activa</Badge>
                             ) : null}
                           </div>
-                          <div className={compareEnabled ? "grid gap-3 lg:grid-cols-2" : "grid gap-3"}>
-                            <div className="space-y-1">
-                              <p className="text-xs text-slate-300">Vista de referencia (original)</p>
-                              {cropUrl ? (
-                                // eslint-disable-next-line @next/next/no-img-element
-                                <img src={cropUrl} alt={item.crop_filename ?? item.crop_id ?? "support-crop"} className="h-36 w-full rounded-md border border-white/10 object-contain bg-black/30" />
-                              ) : (
-                                <div className="flex h-36 items-center justify-center rounded-md border border-dashed border-white/15 text-xs text-muted-foreground">Sin miniatura</div>
-                              )}
-                            </div>
-                            {compareEnabled ? (
-                              <div className="space-y-1">
-                                <p className="text-xs text-slate-300">Vista usada para OCR ({ocrUsedLabel})</p>
-                                {selectedArtifact ? (
-                                  // eslint-disable-next-line @next/next/no-img-element
-                                  <img src={selectedArtifact} alt={`${item.crop_id ?? "support"}-processed`} className="h-36 w-full rounded-md border border-cyan-300/30 object-contain bg-black/30" />
-                                ) : (
-                                  <div className="flex h-36 items-center justify-center rounded-md border border-dashed border-white/15 text-xs text-muted-foreground">No hay artefacto de variante guardado</div>
-                                )}
-                              </div>
-                            ) : null}
-                          </div>
+                          <OcrCompareImages
+                            compareEnabled={compareEnabled}
+                            originalUrl={cropUrl}
+                            processedUrl={selectedArtifact}
+                            processedLabel={`Vista usada para OCR (${ocrUsedLabel})`}
+                            originalAlt={item.crop_filename ?? item.crop_id ?? "support-crop"}
+                            processedAlt={`${item.crop_id ?? "support"}-processed`}
+                            imageClassName="h-36"
+                          />
                           {displayedVariants.length ? (
-                            <div className="mt-3 overflow-x-auto">
-                              <Table>
-                                <TableHeader>
-                                  <TableRow>
-                                    <TableHead>variant</TableHead>
-                                    <TableHead>mode</TableHead>
-                                    <TableHead>score</TableHead>
-                                    <TableHead>chars</TableHead>
-                                    <TableHead>elapsed_ms</TableHead>
-                                    <TableHead>quality</TableHead>
-                                    <TableHead>skip</TableHead>
-                                    <TableHead>preview</TableHead>
-                                  </TableRow>
-                                </TableHeader>
-                                <TableBody>
-                                  {displayedVariants.map((row, vIdx) => (
-                                    <TableRow key={`support-variant-${idx}-${vIdx}`}>
-                                      <TableCell>
-                                        <div className="flex items-center gap-2">
-                                          <span>{row?.variant ?? "-"}</span>
-                                          {row?.variant === displayedWinner ? <Badge>{preprocessMode === "shadow" ? "mejor shadow" : "usada"}</Badge> : null}
-                                        </div>
-                                      </TableCell>
-                                      <TableCell>{row?.mode ?? (preprocessMode === "shadow" ? "shadow" : "active")}</TableCell>
-                                      <TableCell>{typeof row?.score === "number" ? row.score.toFixed(4) : "-"}</TableCell>
-                                      <TableCell>{typeof row?.chars === "number" ? row.chars : "-"}</TableCell>
-                                      <TableCell>{typeof row?.elapsed_ms === "number" ? row.elapsed_ms : "-"}</TableCell>
-                                      <TableCell className="max-w-72 truncate" title={formatQualityMetrics(row?.quality_metrics)}>{formatQualityMetrics(row?.quality_metrics)}</TableCell>
-                                      <TableCell className="max-w-72 truncate" title={typeof row?.ocr_skipped_reason === "string" ? row.ocr_skipped_reason : ""}>{typeof row?.ocr_skipped_reason === "string" ? row.ocr_skipped_reason : "-"}</TableCell>
-                                      <TableCell className="max-w-80">
-                                        <div className="space-y-2">
-                                          <p className="truncate" title={typeof row?.raw_text_preview === "string" ? row.raw_text_preview : ""}>{typeof row?.raw_text_preview === "string" ? row.raw_text_preview : "-"}</p>
-                                          <Button
-                                            size="sm"
-                                            variant="outline"
-                                            onClick={() => setVariantPreviewModal({
-                                              title: `Soporte ${item.crop_id ?? item.crop_filename ?? "crop"}`,
-                                              variant: row?.variant ?? "-",
-                                              preview: typeof row?.raw_text_preview === "string" ? row.raw_text_preview : "",
-                                            })}
-                                          >
-                                            Ver texto completo
-                                          </Button>
-                                        </div>
-                                      </TableCell>
-                                    </TableRow>
-                                  ))}
-                                </TableBody>
-                              </Table>
+                            <div className="mt-3">
+                              <OcrVariantRows
+                                variants={displayedVariants}
+                                displayedWinner={displayedWinner}
+                                preprocessMode={preprocessMode}
+                                cropLabel={item.crop_id ?? item.crop_filename ?? `support_${idx}`}
+                                formatQualityMetrics={formatQualityMetrics}
+                                getArtifactUrl={getVariantArtifactUrl}
+                                showArtifactColumn={false}
+                                onPreview={(variant, preview) => setVariantPreviewModal({
+                                  title: `Soporte ${item.crop_id ?? item.crop_filename ?? "crop"}`,
+                                  variant,
+                                  preview,
+                                })}
+                              />
                             </div>
                           ) : (
                             <p className="mt-3 text-xs text-muted-foreground">
@@ -1561,10 +1482,10 @@ export function AccountJobDetailPage({ account, jobId }: AccountJobDetailPagePro
       ) : null}
 
       {activeView === "visual" ? (
-      <Card className="border-white/10 bg-white/5 backdrop-blur">
-        <CardHeader className="flex flex-row items-center justify-between">
+      <Card id="job-visual-md-report" className="scroll-mt-32 border-white/10 bg-white/5 backdrop-blur">
+        <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <CardTitle>Reporte técnico de análisis OCR/LLM</CardTitle>
-          <div className="flex flex-wrap gap-2">
+          <div className="flex w-full flex-wrap gap-2 sm:w-auto sm:justify-end">
             {selectedImage?.result_md_url ? (
               <>
                 <Button
@@ -1643,7 +1564,7 @@ export function AccountJobDetailPage({ account, jobId }: AccountJobDetailPagePro
       ) : null}
 
       {activeView === "visual" ? (
-      <Card className="border-white/10 bg-white/5 backdrop-blur">
+      <Card id="job-visual-trace" className="scroll-mt-32 border-white/10 bg-white/5 backdrop-blur">
         <CardHeader><CardTitle>Traza OCR + LLM</CardTitle></CardHeader>
         <CardContent>
           {!artifacts.analysisTrace.length ? (
@@ -1682,14 +1603,8 @@ export function AccountJobDetailPage({ account, jobId }: AccountJobDetailPagePro
                         <p>delta top1-top2: {formatPrimitive(catalogMemory.top_score_delta)}</p>
                         <p>ambiguous_top2: {formatPrimitive(catalogMemory.ambiguous_top2)}</p>
                       </div>
-                      <div className="rounded-md border border-white/10 bg-black/25 p-2 text-xs">
-                        <p className="font-semibold text-slate-300">Top candidate</p>
-                        <pre className="mt-1 max-h-24 overflow-auto whitespace-pre-wrap break-words text-xs text-slate-200">{JSON.stringify(catalogMemory.top_candidate ?? null, null, 2)}</pre>
-                      </div>
-                      <div className="rounded-md border border-white/10 bg-black/25 p-2 text-xs">
-                        <p className="font-semibold text-slate-300">Blocked reasons</p>
-                        <pre className="mt-1 max-h-24 overflow-auto whitespace-pre-wrap break-words text-xs text-slate-200">{JSON.stringify(catalogMemory.blocked_reasons ?? [], null, 2)}</pre>
-                      </div>
+                      <JsonDebugBlock label="Top candidate" value={catalogMemory.top_candidate ?? null} maxHeightClassName="max-h-24" />
+                      <JsonDebugBlock label="Blocked reasons" value={catalogMemory.blocked_reasons ?? []} maxHeightClassName="max-h-24" />
                     </div>
                   ) : null}
                       </>
@@ -1928,10 +1843,12 @@ export function AccountJobDetailPage({ account, jobId }: AccountJobDetailPagePro
                       <p><span className="text-violet-200/80">source:</span> {formatPrimitive(promotionCatalogMemoryConfig.source)}</p>
                       <p><span className="text-violet-200/80">min_score:</span> {formatPrimitive(promotionCatalogMemoryConfig.min_score)}</p>
                     </div>
-                    <details className="mt-2">
-                      <summary className="cursor-pointer text-cyan-200">Ver config completa usada</summary>
-                      <pre className="mt-2 max-h-40 overflow-auto rounded-md border border-white/10 bg-black/30 p-2 text-xs">{JSON.stringify(promotionCatalogMemoryConfig, null, 2)}</pre>
-                    </details>
+                    <JsonDebugBlock
+                      label="promotion_catalog_memory config completa"
+                      value={promotionCatalogMemoryConfig}
+                      tone="violet"
+                      maxHeightClassName="max-h-40"
+                    />
                   </div>
                 ) : null}
               </>
@@ -1993,10 +1910,7 @@ export function AccountJobDetailPage({ account, jobId }: AccountJobDetailPagePro
                       <p className="font-semibold text-slate-300">OCR preview</p>
                       <p>{String(crop.ocr_text_preview ?? "-")}</p>
                     </div>
-                    <details>
-                      <summary className="cursor-pointer text-cyan-200 text-xs">OCR crudo completo</summary>
-                      <pre className="mt-2 max-h-40 overflow-auto rounded-md border border-white/10 bg-black/30 p-2 text-xs">{String(crop.ocr_raw_text ?? "")}</pre>
-                    </details>
+                    <JsonDebugBlock label="OCR crudo completo" value={String(crop.ocr_raw_text ?? "")} maxHeightClassName="max-h-40" />
 
                     <div className="rounded-md border border-violet-300/20 bg-violet-500/5 p-3 text-xs">
                       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -2038,29 +1952,45 @@ export function AccountJobDetailPage({ account, jobId }: AccountJobDetailPagePro
                       ) : null}
 
                       {visionResponseMeta ? (
-                        <details className="mt-3">
-                          <summary className="cursor-pointer text-cyan-200">Respuesta cruda del modelo visual</summary>
-                          <pre className="mt-2 max-h-40 overflow-auto rounded-md border border-white/10 bg-black/30 p-2 text-xs">{firstText(visionResponseMeta.raw_preview) || "Sin raw_preview"}</pre>
-                        </details>
+                        <div className="mt-3">
+                          <JsonDebugBlock
+                            label="Respuesta cruda del modelo visual"
+                            value={firstText(visionResponseMeta.raw_preview) || "Sin raw_preview"}
+                            tone="violet"
+                            maxHeightClassName="max-h-40"
+                          />
+                        </div>
                       ) : (
                         <p className="mt-3 text-slate-400">Respuesta cruda no disponible para corridas anteriores.</p>
                       )}
 
                       <div className="mt-3 grid gap-3 xl:grid-cols-2">
-                        <div className="rounded border border-white/10 bg-black/25 p-2">
-                          <p className="mb-2 font-semibold text-slate-300">Lo que entendió el modelo visual antes de reglas</p>
+                        <div>
                           {visualBeforeRules.length ? (
-                            <pre className="max-h-52 overflow-auto rounded-md border border-white/10 bg-black/30 p-2 text-xs">{JSON.stringify(visualBeforeRules, null, 2)}</pre>
+                            <JsonDebugBlock
+                              label="visual_structured_products_before_rules"
+                              value={visualBeforeRules}
+                              tone="violet"
+                              maxHeightClassName="max-h-52"
+                            />
                           ) : (
-                            <p className="text-slate-400">El visual no devolvió productos estructurados.</p>
+                            <p className="rounded border border-white/10 bg-black/25 p-3 text-sm text-slate-400">
+                              El visual no devolvió productos estructurados.
+                            </p>
                           )}
                         </div>
-                        <div className="rounded border border-white/10 bg-black/25 p-2">
-                          <p className="mb-2 font-semibold text-slate-300">Resultado después de reglas semánticas</p>
+                        <div>
                           {productsAfterSemantic.length ? (
-                            <pre className="max-h-52 overflow-auto rounded-md border border-white/10 bg-black/30 p-2 text-xs">{JSON.stringify(productsAfterSemantic, null, 2)}</pre>
+                            <JsonDebugBlock
+                              label="products_after_semantic_enrichment"
+                              value={productsAfterSemantic}
+                              tone="emerald"
+                              maxHeightClassName="max-h-52"
+                            />
                           ) : (
-                            <p className="text-slate-400">Sin resultado estructurado después de reglas.</p>
+                            <p className="rounded border border-white/10 bg-black/25 p-3 text-sm text-slate-400">
+                              Sin resultado estructurado después de reglas.
+                            </p>
                           )}
                         </div>
                       </div>
@@ -2078,96 +2008,47 @@ export function AccountJobDetailPage({ account, jobId }: AccountJobDetailPagePro
                       </div>
                     </div>
 
-                    <div className="overflow-x-auto">
-                      <Table>
-                        <TableHeader>
-                          <TableRow>
-                            <TableHead>variant</TableHead>
-                            <TableHead>score</TableHead>
-                            <TableHead>chars</TableHead>
-                            <TableHead>elapsed_ms</TableHead>
-                            <TableHead>preview</TableHead>
-                            <TableHead>artefacto</TableHead>
-                          </TableRow>
-                        </TableHeader>
-                        <TableBody>
-                          {variants.map((variant, vIdx) => {
-                            const artifactUrl = resolveArtifactPreviewUrl(
-                              (typeof variant.artifact_url === "string" ? variant.artifact_url : null) ??
-                              (typeof variant.artifact_path === "string" ? variant.artifact_path : null),
-                            );
-                            const variantName = String(variant.variant ?? "-");
-                            return (
-                              <TableRow key={`ocr-variant-${idx}-${vIdx}`}>
-                                <TableCell>
-                                  <div className="flex items-center gap-2">
-                                    <span>{variantName}</span>
-                                    {variantName === selectedVariant ? <Badge variant="secondary">usada por pipeline</Badge> : null}
-                                  </div>
-                                </TableCell>
-                                <TableCell>{typeof variant.score === "number" ? variant.score.toFixed(4) : "-"}</TableCell>
-                                <TableCell>{typeof variant.chars === "number" ? variant.chars : "-"}</TableCell>
-                                <TableCell>{typeof variant.elapsed_ms === "number" ? variant.elapsed_ms : "-"}</TableCell>
-                                <TableCell className="max-w-96">
-                                  <div className="space-y-2">
-                                    <p className="truncate" title={String(variant.raw_text_preview ?? "")}>{String(variant.raw_text_preview ?? "-")}</p>
-                                    <Button
-                                      size="sm"
-                                      variant="outline"
-                                      onClick={() => setVariantPreviewModal({
-                                        title: `Debug crop ${String(crop.crop_id ?? "-")}`,
-                                        variant: variantName,
-                                        preview: typeof variant.raw_text_preview === "string" ? variant.raw_text_preview : "",
-                                      })}
-                                    >
-                                      Ver texto completo
-                                    </Button>
-                                  </div>
-                                </TableCell>
-                                <TableCell>{artifactUrl ? <a href={artifactUrl} target="_blank" rel="noreferrer" className="text-cyan-200 underline">ver variante</a> : <span className="text-muted-foreground">sin artefacto</span>}</TableCell>
-                              </TableRow>
-                            );
-                          })}
-                        </TableBody>
-                      </Table>
-                    </div>
+                    <OcrVariantRows
+                      variants={variants}
+                      displayedWinner={selectedVariant}
+                      preprocessMode="active"
+                      cropLabel={`debug-${String(crop.crop_id ?? idx)}`}
+                      formatQualityMetrics={formatQualityMetrics}
+                      getArtifactUrl={(row) =>
+                        resolveArtifactPreviewUrl(
+                          (typeof row?.artifact_url === "string" ? row.artifact_url : null) ??
+                          (typeof row?.artifact_path === "string" ? row.artifact_path : null),
+                        )
+                      }
+                      onPreview={(variant, preview) => setVariantPreviewModal({
+                        title: `Debug crop ${String(crop.crop_id ?? "-")}`,
+                        variant,
+                        preview,
+                      })}
+                    />
 
                     {shadowVariants.length ? (
                       <details>
                         <summary className="cursor-pointer text-cyan-200 text-xs">Ver variantes shadow</summary>
-                        <div className="mt-2 overflow-x-auto">
-                          <Table>
-                            <TableHeader>
-                              <TableRow>
-                                <TableHead>variant</TableHead>
-                                <TableHead>score</TableHead>
-                                <TableHead>chars</TableHead>
-                                <TableHead>elapsed_ms</TableHead>
-                                <TableHead>skip</TableHead>
-                                <TableHead>quality</TableHead>
-                                <TableHead>artefacto</TableHead>
-                              </TableRow>
-                            </TableHeader>
-                            <TableBody>
-                              {shadowVariants.map((variant, shadowIdx) => {
-                                const artifactUrl = resolveArtifactPreviewUrl(
-                                  (typeof variant.artifact_url === "string" ? variant.artifact_url : null) ??
-                                  (typeof variant.artifact_path === "string" ? variant.artifact_path : null),
-                                );
-                                return (
-                                  <TableRow key={`shadow-variant-${idx}-${shadowIdx}`}>
-                                    <TableCell>{String(variant.variant ?? "-")}</TableCell>
-                                    <TableCell>{typeof variant.score === "number" ? variant.score.toFixed(4) : "-"}</TableCell>
-                                    <TableCell>{typeof variant.chars === "number" ? variant.chars : "-"}</TableCell>
-                                    <TableCell>{typeof variant.elapsed_ms === "number" ? variant.elapsed_ms : "-"}</TableCell>
-                                    <TableCell className="max-w-72 truncate" title={String(variant.ocr_skipped_reason ?? "")}>{String(variant.ocr_skipped_reason ?? "-")}</TableCell>
-                                    <TableCell className="max-w-72 truncate" title={formatQualityMetrics(variant.quality_metrics)}>{formatQualityMetrics(variant.quality_metrics)}</TableCell>
-                                    <TableCell>{artifactUrl ? <a href={artifactUrl} target="_blank" rel="noreferrer" className="text-cyan-200 underline">abrir</a> : <span className="text-muted-foreground">sin artefacto</span>}</TableCell>
-                                  </TableRow>
-                                );
-                              })}
-                            </TableBody>
-                          </Table>
+                        <div className="mt-2">
+                          <OcrVariantRows
+                            variants={shadowVariants}
+                            displayedWinner={typeof shadowSummary?.best_variant === "string" ? shadowSummary.best_variant : null}
+                            preprocessMode="shadow"
+                            cropLabel={`debug-shadow-${String(crop.crop_id ?? idx)}`}
+                            formatQualityMetrics={formatQualityMetrics}
+                            getArtifactUrl={(row) =>
+                              resolveArtifactPreviewUrl(
+                                (typeof row?.artifact_url === "string" ? row.artifact_url : null) ??
+                                (typeof row?.artifact_path === "string" ? row.artifact_path : null),
+                              )
+                            }
+                            onPreview={(variant, preview) => setVariantPreviewModal({
+                              title: `Debug shadow ${String(crop.crop_id ?? "-")}`,
+                              variant,
+                              preview,
+                            })}
+                          />
                         </div>
                       </details>
                     ) : null}
@@ -2181,10 +2062,7 @@ export function AccountJobDetailPage({ account, jobId }: AccountJobDetailPagePro
                       </div>
                     </div>
 
-                    <details>
-                      <summary className="cursor-pointer text-cyan-200 text-xs">evidence_by_field</summary>
-                      <pre className="mt-2 max-h-48 overflow-auto rounded-md border border-white/10 bg-black/30 p-2 text-xs">{JSON.stringify(evidenceByField, null, 2)}</pre>
-                    </details>
+                    <JsonDebugBlock label="evidence_by_field" value={evidenceByField} maxHeightClassName="max-h-48" />
 
                     <div>
                       <p className="mb-1 text-xs font-semibold text-slate-300">sanity_checks</p>
@@ -2259,10 +2137,7 @@ export function AccountJobDetailPage({ account, jobId }: AccountJobDetailPagePro
                     </div>
                     <p className="text-xs text-slate-300">evidence_tokens: {Array.isArray(audit.evidence_tokens) ? audit.evidence_tokens.join(", ") : "-"}</p>
                     <p className="text-xs text-slate-300">support_evidence_tokens: {Array.isArray(audit.support_evidence_tokens) ? audit.support_evidence_tokens.join(", ") : "-"}</p>
-                    <details>
-                      <summary className="cursor-pointer text-cyan-200 text-xs">field_audit</summary>
-                      <pre className="mt-2 max-h-40 overflow-auto rounded-md border border-white/10 bg-black/30 p-2 text-xs">{JSON.stringify(audit.field_audit ?? {}, null, 2)}</pre>
-                    </details>
+                    <JsonDebugBlock label="field_audit" value={audit.field_audit ?? {}} maxHeightClassName="max-h-40" />
                   </div>
                 ))}
               </div>
@@ -2273,158 +2148,22 @@ export function AccountJobDetailPage({ account, jobId }: AccountJobDetailPagePro
       ) : null}
 
       {activeView === "artifacts" ? (
-      <Card className="border-white/10 bg-white/5 backdrop-blur">
-        <CardHeader><CardTitle>Imagenes y artefactos por imagen</CardTitle></CardHeader>
-        <CardContent className="space-y-4">
-          {!images.length ? (
-            <p className="text-sm text-muted-foreground">Sin imagenes reportadas en este job.</p>
-          ) : (
-            <>
-              <div className="overflow-x-auto">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>original_name</TableHead>
-                      <TableHead>image_process_code</TableHead>
-                      <TableHead>status</TableHead>
-                      <TableHead>processing_status</TableHead>
-                      <TableHead>no_products_reason</TableHead>
-                      <TableHead>annotated_image_url</TableHead>
-                      <TableHead>result_json_url</TableHead>
-                      <TableHead>result_html_url</TableHead>
-                      <TableHead>result_md_url</TableHead>
-                      <TableHead>soporte_ia_md</TableHead>
-                      <TableHead>soporte_ia_html</TableHead>
-                      <TableHead>proceso_ia_html</TableHead>
-                      <TableHead>proceso_ia_md</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {images.map((image) => (
-                      <TableRow key={`image-row-${image.id}-${image.file_id ?? image.original_name ?? ""}`} className="cursor-pointer" onClick={() => setSelectedImage(image)}>
-                        <TableCell>{image.original_name ?? image.image_name}</TableCell>
-                        <TableCell className="font-mono text-xs">{image.image_process_code ?? "-"}</TableCell>
-                        <TableCell>{image.status}</TableCell>
-                        <TableCell>
-                          {image.processing_status ?? "-"}
-                          {(image.processing_status === "needs_review" || image.status === "needs_review") ? <Badge variant="secondary" className="ml-2">needs_review</Badge> : null}
-                        </TableCell>
-                        <TableCell className="max-w-72 truncate" title={image.no_products_reason ?? ""}>{image.no_products_reason ?? "-"}</TableCell>
-                        <TableCell>{image.annotated_image_url ? <a href={resolveArtifactPreviewUrl(image.annotated_image_url) ?? image.annotated_image_url} className="text-cyan-200 underline" target="_blank" rel="noreferrer">Ver anotada</a> : "No disponible"}</TableCell>
-                        <TableCell>{image.result_json_url ? <a href={resolveArtifactPreviewUrl(image.result_json_url) ?? image.result_json_url} className="text-cyan-200 underline" target="_blank" rel="noreferrer">Abrir JSON imagen</a> : "No disponible"}</TableCell>
-                        <TableCell>{image.result_html_url ? <a href={resolveArtifactPreviewUrl(image.result_html_url) ?? image.result_html_url} className="text-cyan-200 underline" target="_blank" rel="noreferrer">Abrir HTML imagen</a> : "No disponible"}</TableCell>
-                        <TableCell onClick={(event) => event.stopPropagation()}>
-                          {image.result_md_url ? (
-                            <div className="flex min-w-[8.5rem] flex-col gap-1.5">
-                              <Button
-                                size="sm"
-                                className="h-7 w-fit border-cyan-400/40 bg-cyan-600 text-xs hover:bg-cyan-500"
-                                onClick={() => openMdDialog(
-                                  `Reporte OCR/LLM · ${image.original_name ?? image.image_name ?? image.id}`,
-                                  image.result_md_url!,
-                                  `${jobId}_${image.id}_ocr_debug.md`,
-                                )}
-                              >
-                                <ScrollText className="mr-1 h-3 w-3" />
-                                Ver (.md)
-                              </Button>
-                              <a
-                                href={resolveArtifactPreviewUrl(image.result_md_url) ?? image.result_md_url}
-                                className="text-xs text-cyan-200 underline hover:text-cyan-100"
-                                target="_blank"
-                                rel="noreferrer"
-                              >
-                                Abrir reporte tecnico (.md)
-                              </a>
-                            </div>
-                          ) : (
-                            "No disponible"
-                          )}
-                        </TableCell>
-                        <TableCell>{image.support_result_md_url ? <a href={resolveArtifactPreviewUrl(image.support_result_md_url) ?? image.support_result_md_url} className="text-cyan-200 underline" target="_blank" rel="noreferrer">Abrir soporte IA (.md)</a> : "No disponible"}</TableCell>
-                        <TableCell>{image.support_result_html_url ? <a href={resolveArtifactPreviewUrl(image.support_result_html_url) ?? image.support_result_html_url} className="text-cyan-200 underline" target="_blank" rel="noreferrer">Abrir soporte IA (HTML)</a> : "No disponible"}</TableCell>
-                        <TableCell>{image.ai_process_html_url ? <a href={resolveArtifactPreviewUrl(image.ai_process_html_url) ?? image.ai_process_html_url} className="text-cyan-200 underline" target="_blank" rel="noreferrer">Abrir proceso IA (HTML)</a> : "No disponible"}</TableCell>
-                        <TableCell>{image.ai_process_md_url ? <a href={resolveArtifactPreviewUrl(image.ai_process_md_url) ?? image.ai_process_md_url} className="text-cyan-200 underline" target="_blank" rel="noreferrer">Abrir proceso IA (.md)</a> : "No disponible"}</TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              </div>
-
-              {selectedImage ? (
-                <div className="space-y-3 rounded-lg border border-white/10 bg-black/20 p-3">
-                  <p className="text-sm text-slate-300">Preview: {selectedImage.original_name ?? selectedImage.image_name}</p>
-                  {selectedPreviewUrl ? (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img src={selectedPreviewUrl} alt={selectedImage.original_name ?? "annotated"} className="max-h-96 w-full rounded-md border border-white/10 object-contain" />
-                  ) : (
-                    <p className="text-sm text-muted-foreground">No hay preview disponible.</p>
-                  )}
-                  <div className="flex flex-wrap gap-2">
-                    {selectedImage.annotated_image_url ? <a href={resolveArtifactPreviewUrl(selectedImage.annotated_image_url) ?? selectedImage.annotated_image_url} target="_blank" rel="noreferrer"><Button size="sm">Ver anotada</Button></a> : null}
-                    {selectedImage.result_json_url ? <a href={resolveArtifactPreviewUrl(selectedImage.result_json_url) ?? selectedImage.result_json_url} target="_blank" rel="noreferrer"><Button size="sm" variant="outline">Abrir JSON imagen</Button></a> : null}
-                    {selectedImage.result_html_url ? <a href={resolveArtifactPreviewUrl(selectedImage.result_html_url) ?? selectedImage.result_html_url} target="_blank" rel="noreferrer"><Button size="sm" variant="outline">Abrir HTML imagen</Button></a> : null}
-                    {selectedImage.result_md_url ? (
-                      <>
-                        <Button
-                          size="sm"
-                          className="border-cyan-400/40 bg-cyan-600 hover:bg-cyan-500"
-                          onClick={() => openMdDialog(
-                            `Reporte OCR/LLM · ${selectedImage.original_name ?? selectedImage.image_name ?? selectedImage.id}`,
-                            selectedImage.result_md_url!,
-                            `${jobId}_${selectedImage.id}_ocr_debug.md`,
-                          )}
-                        >
-                          <ScrollText className="mr-2 h-4 w-4" />
-                          Ver reporte (.md)
-                        </Button>
-                        <a href={resolveArtifactPreviewUrl(selectedImage.result_md_url) ?? selectedImage.result_md_url} target="_blank" rel="noreferrer">
-                          <Button size="sm" variant="outline"><ScrollText className="mr-2 h-4 w-4" />Abrir reporte tecnico (.md)</Button>
-                        </a>
-                      </>
-                    ) : null}
-                    {selectedImage.support_result_md_url ? <a href={resolveArtifactPreviewUrl(selectedImage.support_result_md_url) ?? selectedImage.support_result_md_url} target="_blank" rel="noreferrer"><Button size="sm" variant="outline">Soporte IA .md</Button></a> : null}
-                    {selectedImage.support_result_html_url ? <a href={resolveArtifactPreviewUrl(selectedImage.support_result_html_url) ?? selectedImage.support_result_html_url} target="_blank" rel="noreferrer"><Button size="sm" variant="outline">Soporte IA HTML</Button></a> : null}
-                    {selectedImage.ai_process_html_url ? <a href={resolveArtifactPreviewUrl(selectedImage.ai_process_html_url) ?? selectedImage.ai_process_html_url} target="_blank" rel="noreferrer"><Button size="sm" variant="outline">Proceso IA HTML</Button></a> : null}
-                    {selectedImage.ai_process_md_url ? <a href={resolveArtifactPreviewUrl(selectedImage.ai_process_md_url) ?? selectedImage.ai_process_md_url} target="_blank" rel="noreferrer"><Button size="sm" variant="outline">Proceso IA .md</Button></a> : null}
-                  </div>
-                  <div className="rounded-md border border-white/10 bg-black/25 p-3">
-                    <p className="mb-2 text-xs font-semibold tracking-wide text-slate-300">Paso a paso (/artifacts)</p>
-                    {imageArtifactsQuery.isLoading ? <Skeleton className="h-24 w-full" /> : null}
-                    {imageArtifactsQuery.error ? (
-                      <p className="text-xs text-amber-300">No se pudo cargar /artifacts para esta imagen. Mostrando fallback de results.</p>
-                    ) : null}
-                    <div className="space-y-3 text-xs">
-                      <div>
-                        <p className="mb-1 text-slate-300">support_name_candidates</p>
-                        <pre className="max-h-28 overflow-auto rounded border border-white/10 bg-black/30 p-2">{JSON.stringify(artifacts.supportNameCandidates ?? [], null, 2)}</pre>
-                      </div>
-                      <div>
-                        <p className="mb-1 text-slate-300">support_memory.raw_text</p>
-                        <pre className="max-h-32 overflow-auto rounded border border-white/10 bg-black/30 p-2">
-{JSON.stringify((artifacts.supportMemory ?? []).map((x) => ({ crop_id: x.crop_id, memory_label: x.memory_label, raw_text: x.raw_text ?? x.raw_text_full ?? "" })), null, 2)}
-                        </pre>
-                      </div>
-                      <div>
-                        <p className="mb-1 text-slate-300">structured_products_before_filter</p>
-                        <pre className="max-h-36 overflow-auto rounded border border-white/10 bg-black/30 p-2">
-{JSON.stringify((artifacts.primaryCrops ?? []).map((crop) => ({ crop_id: crop.crop_id, structured_products_before_filter: crop.structured_products_before_filter ?? [] })), null, 2)}
-                        </pre>
-                      </div>
-                      <div>
-                        <p className="mb-1 text-slate-300">structured_products_after_enrichment</p>
-                        <pre className="max-h-36 overflow-auto rounded border border-white/10 bg-black/30 p-2">
-{JSON.stringify((artifacts.primaryCrops ?? []).map((crop) => ({ crop_id: crop.crop_id, structured_products_after_enrichment: crop.structured_products_after_enrichment ?? [] })), null, 2)}
-                        </pre>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              ) : null}
-            </>
-          )}
-        </CardContent>
-      </Card>
+        <JobArtifactsView
+          images={images}
+          selectedImage={selectedImage}
+          onSelectImage={setSelectedImage}
+          selectedPreviewUrl={selectedPreviewUrl}
+          jobId={jobId}
+          resolveUrl={resolveArtifactPreviewUrl}
+          onOpenMdDialog={openMdDialog}
+          artifacts={{
+            supportNameCandidates: artifacts.supportNameCandidates,
+            supportMemory: artifacts.supportMemory,
+            primaryCrops: artifacts.primaryCrops,
+          }}
+          artifactsLoading={imageArtifactsQuery.isLoading}
+          artifactsError={Boolean(imageArtifactsQuery.error)}
+        />
       ) : null}
 
       <MdReportDialog
