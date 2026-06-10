@@ -15,6 +15,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { MarkdownReportContent, MdReportDialog, fetchMarkdownReport } from "@/components/ui/md-report-dialog";
 
 type AccountJobDetailPageProps = {
   account?: string;
@@ -34,6 +35,12 @@ type VariantPreviewModalState = {
   title: string;
   variant: string;
   preview: string;
+} | null;
+
+type MdDialogRequest = {
+  title: string;
+  sourceUrl: string;
+  downloadFilename?: string;
 } | null;
 
 function formatDate(value?: string | null): string {
@@ -355,6 +362,7 @@ export function AccountJobDetailPage({ account, jobId }: AccountJobDetailPagePro
   const [primaryPreprocessView, setPrimaryPreprocessView] = useState<Record<string, "active" | "shadow">>({});
   const [supportPreprocessView, setSupportPreprocessView] = useState<Record<string, "active" | "shadow">>({});
   const [variantPreviewModal, setVariantPreviewModal] = useState<VariantPreviewModalState>(null);
+  const [mdDialogRequest, setMdDialogRequest] = useState<MdDialogRequest>(null);
   const [imageProcessCodeInput, setImageProcessCodeInput] = useState("");
   const [lookupResult, setLookupResult] = useState<{ job_id?: string; account_name?: string; image_status?: string } | null>(null);
   const [reprocessJobId, setReprocessJobId] = useState<string | null>(null);
@@ -387,6 +395,20 @@ export function AccountJobDetailPage({ account, jobId }: AccountJobDetailPagePro
       return response.text();
     },
   });
+  const mdDialogQuery = useQuery({
+    queryKey: ["job-md-dialog", mdDialogRequest?.sourceUrl],
+    enabled: Boolean(mdDialogRequest?.sourceUrl),
+    retry: false,
+    queryFn: async () => {
+      if (!mdDialogRequest?.sourceUrl) return "";
+      return fetchMarkdownReport(mdDialogRequest.sourceUrl);
+    },
+  });
+
+  function openMdDialog(title: string, rawUrl: string, downloadFilename?: string) {
+    const sourceUrl = resolveArtifactPreviewUrl(rawUrl) ?? rawUrl;
+    setMdDialogRequest({ title, sourceUrl, downloadFilename });
+  }
   const imageArtifactsQuery = useQuery({
     queryKey: ["job-image-artifacts", jobId, selectedImage?.id],
     enabled: Boolean(selectedImage?.id),
@@ -1544,12 +1566,26 @@ export function AccountJobDetailPage({ account, jobId }: AccountJobDetailPagePro
           <CardTitle>Reporte técnico de análisis OCR/LLM</CardTitle>
           <div className="flex flex-wrap gap-2">
             {selectedImage?.result_md_url ? (
-              <a href={resolveArtifactPreviewUrl(selectedImage.result_md_url) ?? selectedImage.result_md_url} target="_blank" rel="noreferrer">
-                <Button size="sm" variant="outline">
+              <>
+                <Button
+                  size="sm"
+                  className="border-cyan-400/40 bg-cyan-600 hover:bg-cyan-500"
+                  onClick={() => openMdDialog(
+                    `Reporte OCR/LLM · ${selectedImage.original_name ?? selectedImage.image_name ?? selectedImage.id}`,
+                    selectedImage.result_md_url!,
+                    `${jobId}_${selectedImage.id}_ocr_debug.md`,
+                  )}
+                >
                   <ScrollText className="mr-2 h-4 w-4" />
-                  Abrir .md
+                  Ver reporte (.md)
                 </Button>
-              </a>
+                <a href={resolveArtifactPreviewUrl(selectedImage.result_md_url) ?? selectedImage.result_md_url} target="_blank" rel="noreferrer">
+                  <Button size="sm" variant="outline">
+                    <ScrollText className="mr-2 h-4 w-4" />
+                    Abrir .md
+                  </Button>
+                </a>
+              </>
             ) : null}
             {selectedImage?.support_result_md_url ? (
               <a href={resolveArtifactPreviewUrl(selectedImage.support_result_md_url) ?? selectedImage.support_result_md_url} target="_blank" rel="noreferrer">
@@ -1597,9 +1633,9 @@ export function AccountJobDetailPage({ account, jobId }: AccountJobDetailPagePro
             ) : mdReportQuery.error ? (
               <p className="text-sm text-amber-300">No se pudo cargar el contenido del .md. Puedes abrirlo en una pestaña nueva.</p>
             ) : (
-              <pre className="max-h-80 overflow-auto rounded-md border border-white/10 bg-black/25 p-3 text-xs whitespace-pre-wrap">
-                {mdReportQuery.data}
-              </pre>
+              <div className="max-h-96 overflow-auto rounded-md border border-white/10 bg-black/25 p-4">
+                <MarkdownReportContent content={mdReportQuery.data ?? ""} />
+              </div>
             )
           ) : null}
         </CardContent>
@@ -2277,7 +2313,34 @@ export function AccountJobDetailPage({ account, jobId }: AccountJobDetailPagePro
                         <TableCell>{image.annotated_image_url ? <a href={resolveArtifactPreviewUrl(image.annotated_image_url) ?? image.annotated_image_url} className="text-cyan-200 underline" target="_blank" rel="noreferrer">Ver anotada</a> : "No disponible"}</TableCell>
                         <TableCell>{image.result_json_url ? <a href={resolveArtifactPreviewUrl(image.result_json_url) ?? image.result_json_url} className="text-cyan-200 underline" target="_blank" rel="noreferrer">Abrir JSON imagen</a> : "No disponible"}</TableCell>
                         <TableCell>{image.result_html_url ? <a href={resolveArtifactPreviewUrl(image.result_html_url) ?? image.result_html_url} className="text-cyan-200 underline" target="_blank" rel="noreferrer">Abrir HTML imagen</a> : "No disponible"}</TableCell>
-                        <TableCell>{image.result_md_url ? <a href={resolveArtifactPreviewUrl(image.result_md_url) ?? image.result_md_url} className="text-cyan-200 underline" target="_blank" rel="noreferrer">Abrir reporte tecnico (.md)</a> : "No disponible"}</TableCell>
+                        <TableCell onClick={(event) => event.stopPropagation()}>
+                          {image.result_md_url ? (
+                            <div className="flex min-w-[8.5rem] flex-col gap-1.5">
+                              <Button
+                                size="sm"
+                                className="h-7 w-fit border-cyan-400/40 bg-cyan-600 text-xs hover:bg-cyan-500"
+                                onClick={() => openMdDialog(
+                                  `Reporte OCR/LLM · ${image.original_name ?? image.image_name ?? image.id}`,
+                                  image.result_md_url!,
+                                  `${jobId}_${image.id}_ocr_debug.md`,
+                                )}
+                              >
+                                <ScrollText className="mr-1 h-3 w-3" />
+                                Ver (.md)
+                              </Button>
+                              <a
+                                href={resolveArtifactPreviewUrl(image.result_md_url) ?? image.result_md_url}
+                                className="text-xs text-cyan-200 underline hover:text-cyan-100"
+                                target="_blank"
+                                rel="noreferrer"
+                              >
+                                Abrir reporte tecnico (.md)
+                              </a>
+                            </div>
+                          ) : (
+                            "No disponible"
+                          )}
+                        </TableCell>
                         <TableCell>{image.support_result_md_url ? <a href={resolveArtifactPreviewUrl(image.support_result_md_url) ?? image.support_result_md_url} className="text-cyan-200 underline" target="_blank" rel="noreferrer">Abrir soporte IA (.md)</a> : "No disponible"}</TableCell>
                         <TableCell>{image.support_result_html_url ? <a href={resolveArtifactPreviewUrl(image.support_result_html_url) ?? image.support_result_html_url} className="text-cyan-200 underline" target="_blank" rel="noreferrer">Abrir soporte IA (HTML)</a> : "No disponible"}</TableCell>
                         <TableCell>{image.ai_process_html_url ? <a href={resolveArtifactPreviewUrl(image.ai_process_html_url) ?? image.ai_process_html_url} className="text-cyan-200 underline" target="_blank" rel="noreferrer">Abrir proceso IA (HTML)</a> : "No disponible"}</TableCell>
@@ -2301,7 +2364,25 @@ export function AccountJobDetailPage({ account, jobId }: AccountJobDetailPagePro
                     {selectedImage.annotated_image_url ? <a href={resolveArtifactPreviewUrl(selectedImage.annotated_image_url) ?? selectedImage.annotated_image_url} target="_blank" rel="noreferrer"><Button size="sm">Ver anotada</Button></a> : null}
                     {selectedImage.result_json_url ? <a href={resolveArtifactPreviewUrl(selectedImage.result_json_url) ?? selectedImage.result_json_url} target="_blank" rel="noreferrer"><Button size="sm" variant="outline">Abrir JSON imagen</Button></a> : null}
                     {selectedImage.result_html_url ? <a href={resolveArtifactPreviewUrl(selectedImage.result_html_url) ?? selectedImage.result_html_url} target="_blank" rel="noreferrer"><Button size="sm" variant="outline">Abrir HTML imagen</Button></a> : null}
-                    {selectedImage.result_md_url ? <a href={resolveArtifactPreviewUrl(selectedImage.result_md_url) ?? selectedImage.result_md_url} target="_blank" rel="noreferrer"><Button size="sm" variant="outline"><ScrollText className="mr-2 h-4 w-4" />Abrir reporte tecnico (.md)</Button></a> : null}
+                    {selectedImage.result_md_url ? (
+                      <>
+                        <Button
+                          size="sm"
+                          className="border-cyan-400/40 bg-cyan-600 hover:bg-cyan-500"
+                          onClick={() => openMdDialog(
+                            `Reporte OCR/LLM · ${selectedImage.original_name ?? selectedImage.image_name ?? selectedImage.id}`,
+                            selectedImage.result_md_url!,
+                            `${jobId}_${selectedImage.id}_ocr_debug.md`,
+                          )}
+                        >
+                          <ScrollText className="mr-2 h-4 w-4" />
+                          Ver reporte (.md)
+                        </Button>
+                        <a href={resolveArtifactPreviewUrl(selectedImage.result_md_url) ?? selectedImage.result_md_url} target="_blank" rel="noreferrer">
+                          <Button size="sm" variant="outline"><ScrollText className="mr-2 h-4 w-4" />Abrir reporte tecnico (.md)</Button>
+                        </a>
+                      </>
+                    ) : null}
                     {selectedImage.support_result_md_url ? <a href={resolveArtifactPreviewUrl(selectedImage.support_result_md_url) ?? selectedImage.support_result_md_url} target="_blank" rel="noreferrer"><Button size="sm" variant="outline">Soporte IA .md</Button></a> : null}
                     {selectedImage.support_result_html_url ? <a href={resolveArtifactPreviewUrl(selectedImage.support_result_html_url) ?? selectedImage.support_result_html_url} target="_blank" rel="noreferrer"><Button size="sm" variant="outline">Soporte IA HTML</Button></a> : null}
                     {selectedImage.ai_process_html_url ? <a href={resolveArtifactPreviewUrl(selectedImage.ai_process_html_url) ?? selectedImage.ai_process_html_url} target="_blank" rel="noreferrer"><Button size="sm" variant="outline">Proceso IA HTML</Button></a> : null}
@@ -2345,6 +2426,17 @@ export function AccountJobDetailPage({ account, jobId }: AccountJobDetailPagePro
         </CardContent>
       </Card>
       ) : null}
+
+      <MdReportDialog
+        open={Boolean(mdDialogRequest)}
+        onClose={() => setMdDialogRequest(null)}
+        title={mdDialogRequest?.title ?? "Reporte OCR/LLM"}
+        markdown={mdDialogQuery.data ?? null}
+        isLoading={mdDialogQuery.isLoading}
+        error={mdDialogQuery.error instanceof Error ? mdDialogQuery.error.message : mdDialogQuery.error ? "Error al cargar markdown" : null}
+        sourceUrl={mdDialogRequest?.sourceUrl ?? null}
+        downloadFilename={mdDialogRequest?.downloadFilename}
+      />
 
       {variantPreviewModal ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4">
