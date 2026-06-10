@@ -4,7 +4,7 @@ import Link from "next/link";
 import { ChangeEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQueries, useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { HttpError, ocrApi } from "@/lib/ocrApi";
+import { getJobId, HttpError, ocrApi } from "@/lib/ocrApi";
 import type { CreateShelfJobRequest, RecentJob, ShelfAsset, ShelfDatasetRole, ShelfDatasetSummaryResponse, ShelfDiagnostics, ShelfEmbeddingsRecomputeResponse, ShelfEvaluateCropResponse, ShelfExtractedCrop, ShelfHardNegative, ShelfReviewQueueItem, ShelfSku, ShelfSkuDeleteResponse, ShelfSkuImage, ShelfSkuImageResponse, ShelfSkuTestJobResponse } from "@/types/ocr-api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -15,7 +15,9 @@ import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
 import { UploadPanel } from "@/components/jobs/upload-panel";
+import { ShelfCropLightbox } from "@/components/shelf/shelf-crop-lightbox";
 import { ShelfSkuUploadSafeguard } from "@/components/shelf/shelf-sku-upload-safeguard";
+import { Checkbox } from "@/components/ui/checkbox";
 
 type Props = { account: string };
 type Tab = "jobs" | "results" | "skus" | "assets" | "index" | "review";
@@ -441,6 +443,19 @@ function countLabel(value: unknown): string {
   return typeof value === "number" && Number.isFinite(value) ? String(value) : "0";
 }
 
+function formatShelfJobDuration(start?: string | null, end?: string | null): string {
+  const startMs = start ? new Date(start).getTime() : 0;
+  const endMs = end ? new Date(end).getTime() : 0;
+  if (!startMs || !endMs || endMs < startMs) return "-";
+  const seconds = Math.round((endMs - startMs) / 1000);
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = seconds % 60;
+  if (h > 0) return `${h}h ${m}m ${s}s`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
 function formatDateTime(value?: string | null): string {
   if (!value) return "-";
   const date = new Date(value);
@@ -840,6 +855,13 @@ export function AccountShelfPage({ account }: Props) {
   const [cropDatasetSplit, setCropDatasetSplit] = useState("");
   const [selectedTrainingCropKeys, setSelectedTrainingCropKeys] = useState<string[]>([]);
   const [trainingGroupLabel, setTrainingGroupLabel] = useState("");
+  const [resultsViewFilter, setResultsViewFilter] = useState<"all" | "review" | "unassigned" | "selected">("all");
+  const [resultsSearchQuery, setResultsSearchQuery] = useState("");
+  const [resultsThumbScale, setResultsThumbScale] = useState<"sm" | "md" | "lg">("md");
+  const [resultsBulkFocus, setResultsBulkFocus] = useState(false);
+  const [lastResultSelectIndex, setLastResultSelectIndex] = useState<number | null>(null);
+  const [resultsTableCollapsed, setResultsTableCollapsed] = useState(true);
+  const [cropLightbox, setCropLightbox] = useState<{ url: string; title: string } | null>(null);
 
   const [skuForm, setSkuForm] = useState({
     sku_code: "",
@@ -1100,7 +1122,7 @@ export function AccountShelfPage({ account }: Props) {
   const recentShelfJobsQuery = useQuery({
     queryKey: ["recent-shelf-jobs", account],
     queryFn: () => ocrApi.listShelfJobs(account, 100),
-    enabled: shelfEnabled && ["jobs", "results"].includes(tab),
+    enabled: shelfEnabled,
     staleTime: 15_000,
   });
 
@@ -2009,6 +2031,129 @@ export function AccountShelfPage({ account }: Props) {
       .filter((item): item is { image_id: number; crop_id: string; metadata: Record<string, unknown> } => Boolean(item));
   }, [cropActionSkuId, selectedTrainingCropKeySet, shelfResults, trainingGroupLabel]);
 
+  const shelfResultEntries = useMemo(
+    () =>
+      shelfResults.map((row, idx) => {
+        const imageId = resultImageIdValue(row);
+        const cropId = resultCropIdValue(row);
+        return {
+          row,
+          idx,
+          imageId,
+          cropId,
+          selectKey: imageId !== null && cropId ? trainingCropKey(imageId, cropId) : null,
+        };
+      }),
+    [shelfResults],
+  );
+
+  const filteredShelfResultEntries = useMemo(() => {
+    const query = resultsSearchQuery.trim().toLowerCase();
+    return shelfResultEntries.filter(({ row, selectKey }) => {
+      if (resultsViewFilter === "review" && !resultBoolean(row, "review_required")) return false;
+      if (resultsViewFilter === "unassigned" && resultHasFinalSku(row)) return false;
+      if (resultsViewFilter === "selected" && (!selectKey || !selectedTrainingCropKeySet.has(selectKey))) return false;
+      if (query) {
+        const haystack = [
+          resultSuggestedSkuLabel(row),
+          resultFinalSkuLabel(row),
+          resultCropIdValue(row),
+          String(row.image_id ?? ""),
+          resultTrayLabel(row),
+          resultGlobalOrderLabel(row),
+        ]
+          .join(" ")
+          .toLowerCase();
+        if (!haystack.includes(query)) return false;
+      }
+      return true;
+    });
+  }, [resultsSearchQuery, resultsViewFilter, selectedTrainingCropKeySet, shelfResultEntries]);
+
+  const resultsThumbHeightClass =
+    resultsThumbScale === "sm" ? "h-28" : resultsThumbScale === "lg" ? "h-64" : "h-44";
+  const resultsGridClass =
+    resultsThumbScale === "sm"
+      ? "md:grid-cols-2 xl:grid-cols-4"
+      : resultsThumbScale === "lg"
+        ? "md:grid-cols-1 xl:grid-cols-2"
+        : "md:grid-cols-2 xl:grid-cols-3";
+
+  const toggleTrainingCropSelection = (
+    entry: { imageId: number | null; cropId: string; idx: number; selectKey: string | null },
+    options?: { shiftKey?: boolean; force?: boolean },
+  ) => {
+    if (entry.imageId === null || !entry.cropId || !entry.selectKey) return;
+    const key = entry.selectKey;
+    if (options?.shiftKey && lastResultSelectIndex !== null) {
+      const startPos = filteredShelfResultEntries.findIndex((item) => item.idx === lastResultSelectIndex);
+      const endPos = filteredShelfResultEntries.findIndex((item) => item.idx === entry.idx);
+      if (startPos >= 0 && endPos >= 0) {
+        const [from, to] = startPos < endPos ? [startPos, endPos] : [endPos, startPos];
+        const rangeKeys = filteredShelfResultEntries
+          .slice(from, to + 1)
+          .map((item) => item.selectKey)
+          .filter((item): item is string => Boolean(item));
+        setSelectedTrainingCropKeys((prev) => Array.from(new Set([...prev, ...rangeKeys])));
+        setLastResultSelectIndex(entry.idx);
+        return;
+      }
+    }
+    setSelectedTrainingCropKeys((prev) => {
+      if (options?.force) return prev.includes(key) ? prev : [...prev, key];
+      return prev.includes(key) ? prev.filter((item) => item !== key) : [...prev, key];
+    });
+    setLastResultSelectIndex(entry.idx);
+  };
+
+  const selectAllFilteredResults = () => {
+    const keys = filteredShelfResultEntries.map((entry) => entry.selectKey).filter((key): key is string => Boolean(key));
+    setSelectedTrainingCropKeys((prev) => Array.from(new Set([...prev, ...keys])));
+  };
+
+  const selectFilteredBySuggestedSku = () => {
+    const sku = cropActionSkuId.trim() || resultSuggestedSkuLabel(filteredShelfResultEntries[0]?.row ?? {});
+    if (!sku || sku === "-") {
+      toast.message("Escribe un SKU destino o filtra crops con sugerencia clara.");
+      return;
+    }
+    const normalized = normalizeSkuSearchToken(sku);
+    const keys = shelfResultEntries
+      .filter(({ row }) => {
+        const suggested = normalizeSkuSearchToken(resultSuggestedSkuLabel(row));
+        const finalSku = normalizeSkuSearchToken(resultFinalSkuLabel(row));
+        return suggested === normalized || finalSku === normalized;
+      })
+      .map((entry) => entry.selectKey)
+      .filter((key): key is string => Boolean(key));
+    setSelectedTrainingCropKeys((prev) => Array.from(new Set([...prev, ...keys])));
+    toast.success(`Seleccionados ${keys.length} crops con SKU ${sku}`);
+  };
+
+  useEffect(() => {
+    if (tab !== "results") return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.closest("input, textarea, select, [contenteditable='true']")) return;
+      if (event.key === "Escape") {
+        if (cropLightbox) {
+          setCropLightbox(null);
+          return;
+        }
+        if (selectedTrainingCropKeys.length) setSelectedTrainingCropKeys([]);
+      }
+      if ((event.key === "a" || event.key === "A") && (event.ctrlKey || event.metaKey)) {
+        event.preventDefault();
+        const keys = filteredShelfResultEntries
+          .map((entry) => entry.selectKey)
+          .filter((key): key is string => Boolean(key));
+        setSelectedTrainingCropKeys((prev) => Array.from(new Set([...prev, ...keys])));
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [cropLightbox, filteredShelfResultEntries, selectedTrainingCropKeys.length, tab]);
+
   const recentShelfJobs = useMemo(() => {
     const q = recentShelfJobSearch.trim().toLowerCase();
     return (recentShelfJobsQuery.data ?? [])
@@ -2030,11 +2175,11 @@ export function AccountShelfPage({ account }: Props) {
           .toLowerCase();
         return haystack.includes(q);
       })
-      .slice(0, 12);
+      .slice(0, 50);
   }, [account, recentShelfJobSearch, recentShelfJobsQuery.data]);
 
   const recentShelfJobDetailQueries = useQueries({
-    queries: recentShelfJobs.slice(0, 12).map((job) => ({
+    queries: recentShelfJobs.slice(0, 20).map((job) => ({
       queryKey: ["recent-shelf-job-detail-card", job.job_id],
       queryFn: () => ocrApi.getShelfJob(job.job_id),
       enabled: shelfEnabled && tab === "jobs" && Boolean(job.job_id),
@@ -2045,7 +2190,7 @@ export function AccountShelfPage({ account }: Props) {
 
   const recentShelfJobDetailMap = useMemo(() => {
     const map = new Map<string, Record<string, unknown>>();
-    recentShelfJobs.slice(0, 12).forEach((job, index) => {
+    recentShelfJobs.slice(0, 20).forEach((job, index) => {
       const data = recentShelfJobDetailQueries[index]?.data;
       if (data && typeof data === "object") {
         map.set(job.job_id, data as Record<string, unknown>);
@@ -2802,6 +2947,71 @@ export function AccountShelfPage({ account }: Props) {
               ) : (
                 <p className="mt-3 text-sm text-slate-400">No encontramos jobs recientes de Shelf con esos filtros.</p>
               )}
+
+              {recentShelfJobs.length ? (
+                <div className="mt-6 overflow-x-auto rounded-lg border border-white/10">
+                  <p className="border-b border-white/10 bg-black/20 px-3 py-2 text-sm font-semibold text-slate-100">Jobs previos (Shelf)</p>
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>Job</TableHead>
+                        <TableHead>Tipo</TableHead>
+                        <TableHead>Subcategoria</TableHead>
+                        <TableHead>status</TableHead>
+                        <TableHead>created_at</TableHead>
+                        <TableHead>updated_at</TableHead>
+                        <TableHead>total_images</TableHead>
+                        <TableHead>processed_images</TableHead>
+                        <TableHead>failed_images</TableHead>
+                        <TableHead>duration</TableHead>
+                        <TableHead>acciones</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {recentShelfJobs.map((row) => {
+                        const safeJobId = getJobId(row);
+                        const isLoaded = safeJobId === selectedJobId;
+                        return (
+                          <TableRow key={`shelf-history-${safeJobId}`} className={isLoaded ? "bg-cyan-500/10" : undefined}>
+                            <TableCell className="min-w-[220px]">
+                              <div className="space-y-1">
+                                <p className="font-mono text-xs text-white">{safeJobId || "-"}</p>
+                                <p className="text-xs text-slate-400">PDV: {row.id_pdv ?? "-"}</p>
+                              </div>
+                            </TableCell>
+                            <TableCell className="min-w-[180px]">
+                              <div className="space-y-1">
+                                <Badge variant="outline" className="border-cyan-400/30 bg-cyan-500/10 text-cyan-100">
+                                  {shelfRecentJobTypeLabel(row)}
+                                </Badge>
+                                <p className="text-[11px] text-slate-500">{firstNonEmptyString(row.job_module, row.job_type) || "-"}</p>
+                              </div>
+                            </TableCell>
+                            <TableCell>{row.subcategoria ?? "-"}</TableCell>
+                            <TableCell>{statusBadge(String(row.status ?? "unknown"))}</TableCell>
+                            <TableCell className="text-xs">{formatDateTime(row.created_at)}</TableCell>
+                            <TableCell className="text-xs">{formatDateTime(row.updated_at)}</TableCell>
+                            <TableCell>{row.total_images ?? 0}</TableCell>
+                            <TableCell>{row.processed_images ?? 0}</TableCell>
+                            <TableCell>{row.failed_images ?? 0}</TableCell>
+                            <TableCell className="text-xs">{formatShelfJobDuration(row.started_at ?? row.created_at, row.finished_at ?? row.updated_at)}</TableCell>
+                            <TableCell>
+                              <div className="flex flex-wrap gap-1.5">
+                                <Button size="sm" onClick={() => loadShelfJob(safeJobId, "results")} disabled={!safeJobId}>
+                                  Abrir resultados
+                                </Button>
+                                <Button size="sm" variant="outline" onClick={() => loadShelfJob(safeJobId, "jobs")} disabled={!safeJobId}>
+                                  Cargar
+                                </Button>
+                              </div>
+                            </TableCell>
+                          </TableRow>
+                        );
+                      })}
+                    </TableBody>
+                  </Table>
+                </div>
+              ) : null}
             </div>
           </CardContent>
         </Card>
@@ -2810,7 +3020,40 @@ export function AccountShelfPage({ account }: Props) {
       {tab === "results" ? (
         <Card className="border-white/10 bg-white/5">
           <CardHeader><CardTitle>Resultados + eventos + métricas</CardTitle></CardHeader>
-          <CardContent className="space-y-4">
+          <CardContent className={`space-y-4 ${selectedResultTrainingItems.length ? "pb-28" : ""}`}>
+            <div className="rounded-lg border border-cyan-300/20 bg-cyan-500/5 p-3">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <p className="text-sm font-semibold text-slate-100">Historial integrado Shelf</p>
+                  <p className="text-xs text-slate-300">Cambia de job sin salir de Resultados. Misma fuente que el historial general de la cuenta.</p>
+                </div>
+                <Button variant="outline" size="sm" onClick={() => recentShelfJobsQuery.refetch()} disabled={recentShelfJobsQuery.isFetching}>
+                  Refrescar historial
+                </Button>
+              </div>
+              <div className="mt-3 flex flex-wrap gap-2">
+                {recentShelfJobs.slice(0, 8).map((row) => {
+                  const jobKey = getJobId(row);
+                  const active = jobKey === selectedJobId;
+                  return (
+                    <Button
+                      key={`results-quick-job-${jobKey}`}
+                      size="sm"
+                      variant={active ? "default" : "outline"}
+                      onClick={() => loadShelfJob(jobKey, "results")}
+                      disabled={!jobKey}
+                      className="max-w-full"
+                    >
+                      <span className="truncate font-mono text-xs">{jobKey}</span>
+                    </Button>
+                  );
+                })}
+                {!recentShelfJobs.length && !recentShelfJobsQuery.isLoading ? (
+                  <span className="text-xs text-slate-400">Sin jobs Shelf recientes para esta cuenta.</span>
+                ) : null}
+              </div>
+            </div>
+
             <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-white/10 bg-black/20 p-3">
               <div>
                 <p className="text-sm font-semibold text-slate-100">Job cargado</p>
@@ -3382,10 +3625,25 @@ export function AccountShelfPage({ account }: Props) {
                 </div>
               </div>
             ) : null}
-            <div className="overflow-x-auto rounded-lg border border-white/10">
+            <details className="rounded-lg border border-white/10 bg-black/15 px-3 py-2" open={!resultsTableCollapsed}>
+              <summary className="cursor-pointer text-sm font-semibold text-slate-200">
+                Tabla resumen ({filteredShelfResultEntries.length}/{shelfResults.length})
+              </summary>
+              <div className="mt-3 overflow-x-auto rounded-lg border border-white/10">
               <Table>
                 <TableHeader>
                   <TableRow>
+                    <TableHead className="w-10">
+                      <Checkbox
+                        checked={filteredShelfResultEntries.length > 0 && filteredShelfResultEntries.every((entry) => entry.selectKey && selectedTrainingCropKeySet.has(entry.selectKey))}
+                        onCheckedChange={(checked) => {
+                          const keys = filteredShelfResultEntries.map((entry) => entry.selectKey).filter((key): key is string => Boolean(key));
+                          if (checked) setSelectedTrainingCropKeys((prev) => Array.from(new Set([...prev, ...keys])));
+                          else setSelectedTrainingCropKeys((prev) => prev.filter((key) => !keys.includes(key)));
+                        }}
+                        aria-label="Seleccionar todos los visibles"
+                      />
+                    </TableHead>
                     <TableHead>Orden</TableHead>
                     <TableHead>Piso</TableHead>
                     <TableHead>Posición</TableHead>
@@ -3401,8 +3659,27 @@ export function AccountShelfPage({ account }: Props) {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {shelfResults.map((row, i) => (
-                    <TableRow key={`shelf-r-${i}`}>
+                  {filteredShelfResultEntries.map((entry) => {
+                    const row = entry.row;
+                    const i = entry.idx;
+                    const selectedForTraining = entry.selectKey ? selectedTrainingCropKeySet.has(entry.selectKey) : false;
+                    return (
+                    <TableRow
+                      key={`shelf-r-${i}`}
+                      className={selectedForTraining ? "bg-emerald-500/10" : undefined}
+                      onClick={(event) => {
+                        if (!entry.selectKey) return;
+                        toggleTrainingCropSelection(entry, { shiftKey: event.shiftKey });
+                      }}
+                    >
+                      <TableCell onClick={(event) => event.stopPropagation()}>
+                        <Checkbox
+                          checked={selectedForTraining}
+                          disabled={!entry.selectKey}
+                          onCheckedChange={() => entry.selectKey && toggleTrainingCropSelection(entry)}
+                          aria-label={`Seleccionar crop ${entry.cropId || i}`}
+                        />
+                      </TableCell>
                       <TableCell>{resultGlobalOrderLabel(row)}</TableCell>
                       <TableCell>{resultTrayLabel(row)}</TableCell>
                       <TableCell>{resultPositionLabel(row)}</TableCell>
@@ -3445,23 +3722,93 @@ export function AccountShelfPage({ account }: Props) {
                         })()}
                       </TableCell>
                     </TableRow>
-                  ))}
+                  );})}
                   {!shelfResults.length ? (
                     <TableRow>
-                      <TableCell colSpan={12}>
+                      <TableCell colSpan={13}>
                         {shelfJobFailed ? "El job falló antes de generar resultados." : "Sin resultados todavía."}
                       </TableCell>
                     </TableRow>
                   ) : null}
+                  {shelfResults.length && !filteredShelfResultEntries.length ? (
+                    <TableRow>
+                      <TableCell colSpan={13}>Ningún resultado coincide con los filtros actuales.</TableCell>
+                    </TableRow>
+                  ) : null}
                 </TableBody>
               </Table>
-            </div>
+              </div>
+            </details>
 
             {shelfResults.length ? (
               <div className="rounded-lg border border-cyan-300/20 bg-cyan-500/5 p-3">
                 <div className="mb-3">
                   <p className="text-sm font-semibold">Lectura rápida del matching</p>
                   <p className="text-xs text-slate-300">Cada detección te muestra orden visual, decisión sugerida, umbrales y si hubo degradación del stack de embeddings.</p>
+                </div>
+                <div className="mb-4 rounded-xl border border-cyan-300/20 bg-cyan-500/5 p-3">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-semibold text-slate-100">Modo selección rápida</p>
+                      <p className="text-xs text-slate-300">Filtra, agrupa y asigna crops sin perder acciones individuales. Shift+clic rango · Ctrl+A todos visibles · Esc limpiar.</p>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <Badge variant="outline">{filteredShelfResultEntries.length} visibles</Badge>
+                      <Badge variant={selectedResultTrainingItems.length ? "default" : "outline"}>{selectedResultTrainingItems.length} seleccionados</Badge>
+                    </div>
+                  </div>
+                  <div className="mt-3 grid gap-3 lg:grid-cols-[minmax(0,1.2fr)_auto_auto_auto]">
+                    <Input
+                      value={resultsSearchQuery}
+                      onChange={(e) => setResultsSearchQuery(e.target.value)}
+                      placeholder="Buscar por SKU, crop, orden, piso..."
+                    />
+                    <div className="flex flex-wrap gap-2">
+                      {([
+                        ["all", "Todos"],
+                        ["review", "Revisar"],
+                        ["unassigned", "Sin asignar"],
+                        ["selected", "Seleccionados"],
+                      ] as const).map(([key, label]) => (
+                        <Button
+                          key={`results-filter-${key}`}
+                          size="sm"
+                          variant={resultsViewFilter === key ? "default" : "outline"}
+                          onClick={() => setResultsViewFilter(key)}
+                        >
+                          {label}
+                        </Button>
+                      ))}
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {([
+                        ["sm", "Mini"],
+                        ["md", "Medio"],
+                        ["lg", "Grande"],
+                      ] as const).map(([key, label]) => (
+                        <Button
+                          key={`thumb-${key}`}
+                          size="sm"
+                          variant={resultsThumbScale === key ? "default" : "outline"}
+                          onClick={() => setResultsThumbScale(key)}
+                        >
+                          {label}
+                        </Button>
+                      ))}
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <Button size="sm" variant="outline" onClick={selectAllFilteredResults}>Todos visibles</Button>
+                      <Button size="sm" variant="outline" onClick={selectFilteredBySuggestedSku}>Mismo SKU</Button>
+                      <Button size="sm" variant="outline" onClick={() => setSelectedTrainingCropKeys([])} disabled={!selectedTrainingCropKeys.length}>Limpiar</Button>
+                      <Button
+                        size="sm"
+                        variant={resultsBulkFocus ? "default" : "outline"}
+                        onClick={() => setResultsBulkFocus((prev) => !prev)}
+                      >
+                        {resultsBulkFocus ? "Modo grupal ON" : "Modo grupal"}
+                      </Button>
+                    </div>
+                  </div>
                 </div>
                 <div className="mb-4 rounded-xl border border-emerald-300/20 bg-emerald-500/5 p-3">
                   <div className="flex flex-wrap items-start justify-between gap-3">
@@ -3585,14 +3932,16 @@ export function AccountShelfPage({ account }: Props) {
                     </div>
                   ) : null}
                 </div>
-                <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                  {shelfResults.map((row, idx) => {
+                <div className={`grid gap-3 ${resultsGridClass}`}>
+                  {filteredShelfResultEntries.map((entry) => {
+                    const row = entry.row;
+                    const idx = entry.idx;
+                    const imageId = entry.imageId;
+                    const cropId = entry.cropId;
                     const finalSku = resultFinalSkuLabel(row);
                     const hasFinalSku = resultHasFinalSku(row);
                     const suggestedSku = resultSuggestedSkuLabel(row);
                     const candidates = resultTopCandidates(row);
-                    const imageId = resultImageIdValue(row);
-                    const cropId = resultCropIdValue(row);
                     const resultKey = `${String(imageId ?? "no-image")}::${cropId || idx}`;
                     const selectedSkuForRow = (resultSkuOverrides[resultKey] ?? "").trim()
                       || (hasFinalSku ? finalSku : "")
@@ -3603,7 +3952,7 @@ export function AccountShelfPage({ account }: Props) {
                     const scoreDelta = resultNumeric(row, "score_delta");
                     const state = String(row.confidence_state ?? "");
                     const reviewRequired = resultBoolean(row, "review_required");
-                    const selectedForTraining = imageId !== null && cropId ? selectedTrainingCropKeySet.has(trainingCropKey(imageId, cropId)) : false;
+                    const selectedForTraining = entry.selectKey ? selectedTrainingCropKeySet.has(entry.selectKey) : false;
                     const thresholds = formatThresholdEntries(row.confidence_thresholds);
                     const embeddingDiag = resultEmbeddingDiagnostics(row);
                     const rerunOutcome = rerunOutcomeMeta(row);
@@ -3624,24 +3973,41 @@ export function AccountShelfPage({ account }: Props) {
                     const segmentationMeta = segmentationMetaOf(row);
                     const segmentationBadge = segmentationVariantBadge(segmentationMeta);
                     return (
-                      <div key={`result-card-${idx}`} className={`rounded-lg border p-3 ${selectedForTraining ? "border-emerald-300/40 bg-emerald-500/10" : "border-white/10 bg-slate-950/40"}`}>
+                      <div
+                        key={`result-card-${idx}`}
+                        className={`rounded-lg border p-3 transition-colors ${selectedForTraining ? "border-emerald-300/40 bg-emerald-500/10 ring-1 ring-emerald-400/20" : "border-white/10 bg-slate-950/40"}`}
+                        onClick={(event) => {
+                          if (!entry.selectKey) return;
+                          if ((event.target as HTMLElement).closest("button, a, input, textarea, summary, details")) return;
+                          toggleTrainingCropSelection(entry, { shiftKey: event.shiftKey });
+                        }}
+                      >
                         <div className="flex items-start justify-between gap-2">
-                          <div>
+                          <div className="flex min-w-0 items-start gap-2">
+                            <Checkbox
+                              checked={selectedForTraining}
+                              disabled={!entry.selectKey}
+                              onCheckedChange={() => entry.selectKey && toggleTrainingCropSelection(entry)}
+                              onClick={(event) => event.stopPropagation()}
+                              aria-label={`Seleccionar crop ${cropId || idx}`}
+                            />
+                            <div className="min-w-0">
                             <p className="text-[11px] text-slate-400">orden / piso / crop</p>
                             <p className="font-mono text-sm text-slate-100">
                               {resultGlobalOrderLabel(row)} · {resultOrderingLabel(row)} · {firstNonEmptyString(row.crop_id) || String(row.image_id ?? "-")}
                             </p>
+                            </div>
                           </div>
                           <div className="flex flex-wrap justify-end gap-2">
                             <Button
                               size="sm"
                               variant={selectedForTraining ? "default" : "outline"}
-                              onClick={() => {
-                                if (imageId === null || !cropId) return;
-                                const key = trainingCropKey(imageId, cropId);
-                                setSelectedTrainingCropKeys((prev) => (prev.includes(key) ? prev.filter((item) => item !== key) : [...prev, key]));
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                if (!entry.selectKey) return;
+                                toggleTrainingCropSelection(entry, { shiftKey: event.shiftKey });
                               }}
-                              disabled={imageId === null || !cropId}
+                              disabled={!entry.selectKey}
                             >
                               {selectedForTraining ? "Seleccionado" : "Seleccionar"}
                             </Button>
@@ -3662,29 +4028,44 @@ export function AccountShelfPage({ account }: Props) {
 
                         <div className="mt-3 rounded-lg border border-white/10 bg-black/20 p-2">
                           {cropDisplayUrl ? (
-                            <a href={cropZoomUrl} target="_blank" rel="noreferrer" className="block">
+                            <button
+                              type="button"
+                              className="block w-full rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/40"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                setCropLightbox({
+                                  url: cropDisplayUrl,
+                                  title: `${cropId || `crop-${idx + 1}`} · ${hasFinalSku ? finalSku : suggestedSku}`,
+                                });
+                              }}
+                            >
                               {/* eslint-disable-next-line @next/next/no-img-element */}
                               <img
                                 src={cropDisplayUrl}
                                 alt={cropId || `crop-${idx + 1}`}
-                                className="h-44 w-full rounded-md bg-slate-950 object-contain"
+                                className={`${resultsThumbHeightClass} w-full rounded-md bg-slate-950 object-contain`}
                               />
-                            </a>
+                            </button>
                           ) : (
-                            <div className="flex h-44 items-center justify-center rounded-md border border-dashed border-white/10 text-center text-xs text-slate-400">
+                            <div className={`flex ${resultsThumbHeightClass} items-center justify-center rounded-md border border-dashed border-white/10 text-center text-xs text-slate-400`}>
                               Sin preview pública del crop
                             </div>
                           )}
                           <div className="mt-2 flex flex-wrap gap-2">
                             {cropZoomUrl ? (
-                              <a
-                                href={cropZoomUrl}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="rounded-md border border-cyan-300/30 bg-cyan-500/10 px-3 py-2 text-sm text-cyan-100 hover:bg-cyan-500/15"
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  setCropLightbox({
+                                    url: cropDisplayUrl,
+                                    title: `${cropId || `crop-${idx + 1}`} · zoom`,
+                                  });
+                                }}
                               >
-                                Ver grande / zoom
-                              </a>
+                                Zoom inline
+                              </Button>
                             ) : null}
                             {cropDownload ? (
                               <a
@@ -3780,6 +4161,11 @@ export function AccountShelfPage({ account }: Props) {
                           )}
                         </div>
 
+                        {resultsBulkFocus && selectedForTraining ? (
+                          <p className="mt-3 rounded-md border border-emerald-300/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-100">
+                            Incluido en selección grupal. Usa la barra inferior o el panel de entrenamiento para asignar el SKU a todos.
+                          </p>
+                        ) : (
                         <div className={`mt-3 space-y-3 rounded-lg border p-3 ${hasFinalSku ? "border-emerald-300/30 bg-emerald-500/10" : "border-amber-300/30 bg-amber-500/10"}`}>
                           <div>
                             <div className="flex flex-wrap items-center gap-2">
@@ -3865,6 +4251,7 @@ export function AccountShelfPage({ account }: Props) {
                             ) : null}
                           </div>
                         </div>
+                        )}
 
                         {Array.isArray(row.bbox) ? (
                           <div className="mt-3">
@@ -3874,7 +4261,7 @@ export function AccountShelfPage({ account }: Props) {
                         ) : null}
 
                         {(comparison || sourceSnapshot) ? (
-                          <details className="mt-3 rounded-lg border border-white/10 bg-black/20 p-3">
+                          <details className="mt-3 rounded-lg border border-white/10 bg-black/20 p-3" open={!resultsBulkFocus}>
                             <summary className="cursor-pointer text-sm font-medium text-slate-100">Antes vs ahora</summary>
                             <div className="mt-3 grid gap-3 md:grid-cols-2 text-xs text-slate-300">
                               <div className="rounded-md border border-white/10 bg-black/20 p-3">
@@ -3895,7 +4282,7 @@ export function AccountShelfPage({ account }: Props) {
                         ) : null}
 
                         {embeddingDiag ? (
-                          <details className="mt-3 rounded-lg border border-white/10 bg-black/20 p-3">
+                          <details className="mt-3 rounded-lg border border-white/10 bg-black/20 p-3" open={!resultsBulkFocus}>
                             <summary className="cursor-pointer text-sm font-medium text-slate-100">Panel técnico del crop</summary>
                             <div className="mt-3 space-y-3 text-xs text-slate-300">
                               <div className="flex flex-wrap gap-2">
@@ -4003,6 +4390,11 @@ export function AccountShelfPage({ account }: Props) {
                       </div>
                     );
                   })}
+                  {!filteredShelfResultEntries.length ? (
+                    <div className="col-span-full rounded-lg border border-dashed border-white/15 bg-black/20 p-6 text-center text-sm text-slate-400">
+                      Ningún crop coincide con los filtros actuales.
+                    </div>
+                  ) : null}
                 </div>
               </div>
             ) : null}
@@ -4538,6 +4930,41 @@ export function AccountShelfPage({ account }: Props) {
           </CardContent>
         </Card>
       ) : null}
+
+      {tab === "results" && selectedResultTrainingItems.length ? (
+        <div className="fixed inset-x-0 bottom-0 z-50 border-t border-emerald-300/30 bg-slate-950/95 px-4 py-3 shadow-2xl backdrop-blur">
+          <div className="mx-auto flex max-w-7xl flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+            <div className="min-w-0">
+              <p className="text-sm font-semibold text-emerald-100">Entrenamiento grupal · {selectedResultTrainingItems.length} crops</p>
+              <p className="text-xs text-slate-400">SKU destino: {cropActionSkuId || "pendiente"} · {cropActionSkuLookup.exactVerified ? "verificado" : "sin verificar"}</p>
+            </div>
+            <div className="grid flex-1 gap-2 sm:grid-cols-2 lg:max-w-2xl">
+              <Input
+                value={cropActionSkuId}
+                onChange={(e) => {
+                  setCropActionSkuId(e.target.value);
+                  setCropActionSkuSearch(e.target.value);
+                }}
+                placeholder="SKU destino (ej. LML0108)"
+              />
+              <Input value={trainingGroupLabel} onChange={(e) => setTrainingGroupLabel(e.target.value)} placeholder="Etiqueta del grupo (opcional)" />
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Button onClick={() => batchPromoteCropsMutation.mutate()} disabled={batchPromoteCropsMutation.isPending || !cropActionSkuLookup.exactVerified}>
+                Guardar {selectedResultTrainingItems.length} en dataset
+              </Button>
+              <Button variant="outline" onClick={() => setSelectedTrainingCropKeys([])}>Limpiar</Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      <ShelfCropLightbox
+        open={Boolean(cropLightbox)}
+        url={cropLightbox?.url ?? null}
+        title={cropLightbox?.title}
+        onClose={() => setCropLightbox(null)}
+      />
 
       {tab === "skus" ? (
         <Card className="border-white/10 bg-white/5">

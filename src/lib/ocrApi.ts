@@ -3198,32 +3198,73 @@ export const ocrApi = {
   },
 
   listShelfJobs: async (accountName: string, limit = 100): Promise<RecentJob[]> => {
-    try {
-      const params = new URLSearchParams();
-      params.set("limit", String(limit));
-      const body = await request(
-        `/v1/accounts/${encodeURIComponent(accountName)}/shelf/jobs?${params.toString()}`,
-        { method: "GET" },
-        "No se pudieron listar los jobs Shelf"
-      );
+    const parseShelfJobListBody = (body: unknown): RecentJob[] => {
       const rows = Array.isArray(body)
         ? body
         : body && typeof body === "object" && Array.isArray((body as Record<string, unknown>).jobs)
           ? ((body as Record<string, unknown>).jobs as unknown[])
-          : Array.isArray((body as Record<string, unknown>).items)
+          : body && typeof body === "object" && Array.isArray((body as Record<string, unknown>).items)
             ? ((body as Record<string, unknown>).items as unknown[])
             : [];
       return rows
         .map(normalizeRecentJob)
         .filter((row) => getJobId(row).length > 0)
         .sort((a, b) => {
-          const aTime = new Date(a.created_at || 0).getTime();
-          const bTime = new Date(b.created_at || 0).getTime();
+          const aTime = new Date(a.created_at || a.updated_at || 0).getTime();
+          const bTime = new Date(b.created_at || b.updated_at || 0).getTime();
           return bTime - aTime;
         });
-    } catch {
-      return [];
+    };
+
+    const isShelfModuleJob = (row: RecentJob): boolean => {
+      const moduleName = String(row.job_module ?? row.job_type ?? "").trim().toLowerCase();
+      const testMode = String(row.test_mode ?? "").trim().toLowerCase();
+      return (
+        moduleName.includes("shelf")
+        || moduleName.includes("crop")
+        || testMode === "sku_specific"
+        || testMode === "sku_test"
+      );
+    };
+
+    const mergeShelfJobs = (...groups: RecentJob[][]): RecentJob[] => {
+      const map = new Map<string, RecentJob>();
+      for (const group of groups) {
+        for (const row of group) {
+          const jobId = getJobId(row);
+          if (!jobId) continue;
+          map.set(jobId, row);
+        }
+      }
+      return Array.from(map.values()).sort((a, b) => {
+        const aTime = new Date(a.created_at || a.updated_at || 0).getTime();
+        const bTime = new Date(b.created_at || b.updated_at || 0).getTime();
+        return bTime - aTime;
+      });
+    };
+
+    let dedicatedRows: RecentJob[] = [];
+    try {
+      const params = new URLSearchParams();
+      params.set("limit", String(limit));
+      const body = await request(
+        `/v1/accounts/${encodeURIComponent(accountName)}/shelf/jobs?${params.toString()}`,
+        { method: "GET" },
+        "No se pudieron listar los jobs Shelf",
+      );
+      dedicatedRows = parseShelfJobListBody(body);
+    } catch (error) {
+      if (!(error instanceof HttpError) || ![404, 405].includes(error.status)) {
+        throw error;
+      }
     }
+
+    const recentRows = (await ocrApi.listRecentJobs({ accountName, limit: Math.max(limit, 100) }))
+      .filter(isShelfModuleJob)
+      .filter((row) => !row.account_name || row.account_name === accountName);
+
+    const merged = mergeShelfJobs(dedicatedRows, recentRows);
+    return merged.slice(0, limit);
   },
 
   createShelfJob: async (payload: CreateShelfJobRequest): Promise<CreateShelfJobResponse> => {
