@@ -7,12 +7,10 @@ import { Copy, Download, FileJson2, FileSpreadsheet, FileText, Loader2, RefreshC
 import { toast } from "sonner";
 import { HttpError, isFinalJobStatus, ocrApi } from "@/lib/ocrApi";
 import type { AnalysisTraceItem, JobDetection, JobImage, OcrPreprocessResult, OcrPreprocessVariant, PrimaryCrop, SupportMemoryItem } from "@/types/ocr-api";
-import { JobLiveTimeline } from "@/components/jobs/job-live-timeline";
-import { JobMetricsPanel } from "@/components/jobs/job-metrics-panel";
+import { JobOverviewView } from "@/components/jobs-history/job-overview-view";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { MarkdownReportContent, MdReportDialog, fetchMarkdownReport } from "@/components/ui/md-report-dialog";
@@ -470,6 +468,11 @@ export function AccountJobDetailPage({ account, jobId }: AccountJobDetailPagePro
     return jobQuery.data?.images ?? [];
   }, [jobQuery.data?.images, resultsQuery.data?.images]);
 
+  const needsReviewCount = useMemo(
+    () => images.filter((img) => img.processing_status === "needs_review" || img.status === "needs_review").length,
+    [images],
+  );
+
   useEffect(() => {
     setResultsPendingMessage(null);
     setPostCompleteRefreshes(0);
@@ -757,150 +760,47 @@ export function AccountJobDetailPage({ account, jobId }: AccountJobDetailPagePro
       {activeView === "visual" ? <JobVisualSectionNav /> : null}
 
       {activeView === "overview" ? (
-      <div className="grid gap-6 xl:grid-cols-2">
-        <div className="space-y-6">
-          <Card className="border-white/10 bg-white/5 backdrop-blur">
-            <CardHeader><CardTitle>Resumen</CardTitle></CardHeader>
-            <CardContent>
-              {jobQuery.isLoading ? (
-                <div className="space-y-2">
-                  <Skeleton className="h-6 w-44" />
-                  <Skeleton className="h-20 w-full" />
-                </div>
-              ) : jobQuery.error ? (
-                <p className="text-sm text-rose-300">No se pudo cargar detalle de job.</p>
-              ) : (
-                <>
-                  <div className="grid gap-3 sm:grid-cols-2">
-                    <div className="rounded-lg border border-white/10 bg-black/20 p-3"><p className="text-xs text-muted-foreground">job_id</p><p className="font-mono text-xs">{jobQuery.data?.job_id}</p></div>
-                    <div className="rounded-lg border border-white/10 bg-black/20 p-3"><p className="text-xs text-muted-foreground">status</p><Badge variant={getStatusVariant(jobQuery.data?.status ?? "unknown")}>{jobQuery.data?.status ?? "unknown"}</Badge></div>
-                    <div className="rounded-lg border border-white/10 bg-black/20 p-3"><p className="text-xs text-muted-foreground">account_name</p><p>{jobQuery.data?.account_name ?? resolvedAccount}</p></div>
-                    <div className="rounded-lg border border-white/10 bg-black/20 p-3"><p className="text-xs text-muted-foreground">config_name</p><p>{jobQuery.data?.config_name ?? "-"}</p></div>
-                    <div className="rounded-lg border border-white/10 bg-black/20 p-3"><p className="text-xs text-muted-foreground">created_at</p><p className="text-xs">{formatDate(jobQuery.data?.created_at)}</p></div>
-                    <div className="rounded-lg border border-white/10 bg-black/20 p-3"><p className="text-xs text-muted-foreground">started_at</p><p className="text-xs">{formatDate(jobQuery.data?.started_at)}</p></div>
-                    <div className="rounded-lg border border-white/10 bg-black/20 p-3"><p className="text-xs text-muted-foreground">updated_at</p><p className="text-xs">{formatDate(jobQuery.data?.updated_at)}</p></div>
-                    <div className="rounded-lg border border-white/10 bg-black/20 p-3"><p className="text-xs text-muted-foreground">finished_at</p><p className="text-xs">{formatDate(jobQuery.data?.finished_at)}</p></div>
-                    <div className="rounded-lg border border-white/10 bg-black/20 p-3"><p className="text-xs text-muted-foreground">total_images</p><p>{jobQuery.data?.total_images ?? 0}</p></div>
-                    <div className="rounded-lg border border-white/10 bg-black/20 p-3"><p className="text-xs text-muted-foreground">processed_images</p><p>{jobQuery.data?.processed_images ?? 0}</p></div>
-                    <div className="rounded-lg border border-white/10 bg-black/20 p-3"><p className="text-xs text-muted-foreground">failed_images</p><p>{jobQuery.data?.failed_images ?? 0}</p></div>
-                    <div className="rounded-lg border border-white/10 bg-black/20 p-3"><p className="text-xs text-muted-foreground">error</p><p className="text-xs text-rose-300">{jobQuery.data?.error_message ?? "-"}</p></div>
-                  </div>
-                  {(jobQuery.data?.status ?? "").toLowerCase() === "queued" ? (
-                    <div className="mt-3 rounded-lg border border-amber-300/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">
-                      Trabajo en cola. Se procesará automáticamente cuando el runner termine el job actual.
-                    </div>
-                  ) : null}
-	                </>
-	              )}
-	            </CardContent>
-	          </Card>
-
-          <Card className="border-white/10 bg-white/5 backdrop-blur">
-            <CardHeader><CardTitle>Soporte por image_process_code</CardTitle></CardHeader>
-            <CardContent className="space-y-3">
-              <div className="grid gap-2 md:grid-cols-[1fr_auto_auto]">
-                <Input value={imageProcessCodeInput} onChange={(e) => setImageProcessCodeInput(e.target.value)} placeholder="Ej: 123456" />
-                <Button variant="outline" onClick={() => lookupByCodeMutation.mutate()} disabled={lookupByCodeMutation.isPending}>
-                  {lookupByCodeMutation.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
-                  Buscar por código
-                </Button>
-                <Button onClick={() => reprocessByCodeMutation.mutate()} disabled={reprocessByCodeMutation.isPending}>
-                  {reprocessByCodeMutation.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
-                  Reprocesar
-                </Button>
-              </div>
-              {lookupResult ? <p className="text-xs text-muted-foreground">lookup: job={lookupResult.job_id ?? "-"} | account={lookupResult.account_name ?? "-"} | status={lookupResult.image_status ?? "-"}</p> : null}
-              {reprocessJobId ? (
-                <Link href={`/accounts/${encodeURIComponent(resolvedAccount)}/jobs/${encodeURIComponent(reprocessJobId)}`} className="text-cyan-200 underline text-sm">
-                  Abrir nuevo job reprocesado: {reprocessJobId}
-                </Link>
-              ) : null}
-            </CardContent>
-          </Card>
-
-	          <JobMetricsPanel jobId={jobId} isTerminal={isTerminal} />
-	        </div>
-
-        <div className="space-y-6">
-          <JobLiveTimeline jobId={jobId} isTerminal={isTerminal} />
-
-          <Card className="border-white/10 bg-white/5 backdrop-blur">
-            <CardHeader className="flex flex-row items-center justify-between">
-              <CardTitle>Resultados y artefactos</CardTitle>
-              <div className="flex flex-wrap gap-2">
-                <Button size="sm" variant="outline" onClick={async () => {
-                  try {
-                    const events = await ocrApi.getJobEvents(jobId);
-                    downloadJsonFile(`${jobId}_events.json`, events);
-                  } catch (error) {
-                    toast.error("No se pudo exportar eventos", { description: error instanceof HttpError ? error.message : "Error inesperado" });
-                  }
-                }}>
-                  <Download className="mr-2 h-4 w-4" />
-                  Exportar eventos JSON
-                </Button>
-                <Button size="sm" variant="outline" onClick={async () => {
-                  try {
-                    const metrics = await ocrApi.getJobMetrics(jobId);
-                    downloadJsonFile(`${jobId}_metrics.json`, metrics);
-                  } catch (error) {
-                    toast.error("No se pudo exportar metricas", { description: error instanceof HttpError ? error.message : "Error inesperado" });
-                  }
-                }}>
-                  <Download className="mr-2 h-4 w-4" />
-                  Exportar metricas JSON
-                </Button>
-                <Button size="sm" onClick={() => void loadResults()} disabled={resultsQuery.isFetching}>
-                  {resultsQuery.isFetching ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCcw className="mr-2 h-4 w-4" />}
-                  Reintentar
-                </Button>
-              </div>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              {resultsQuery.isLoading ? <Skeleton className="h-24 w-full" /> : null}
-              {resultsPendingMessage ? <p className="text-sm text-amber-300">{resultsPendingMessage}</p> : null}
-              {resultsQuery.error instanceof HttpError && resultsQuery.error.status !== 404 ? (
-                <p className="text-sm text-rose-300">No se pudieron cargar resultados: {resultsQuery.error.detail}</p>
-              ) : null}
-
-              <div className="grid gap-3 sm:grid-cols-3">
-                <div className="rounded-lg border border-white/10 bg-black/20 p-3"><p className="text-xs text-muted-foreground">total_products</p><p className="text-lg font-semibold">{totalProducts}</p></div>
-                <div className="rounded-lg border border-white/10 bg-black/20 p-3"><p className="text-xs text-muted-foreground">total_promotions</p><p className="text-lg font-semibold">{totalPromotions}</p></div>
-                <div className="rounded-lg border border-white/10 bg-black/20 p-3"><p className="text-xs text-muted-foreground">total_barcodes</p><p className="text-lg font-semibold">{totalBarcodes}</p></div>
-              </div>
-              {normalizedUserResponse ? (
-                <div className="grid gap-3 sm:grid-cols-3">
-                  <div className="rounded-lg border border-white/10 bg-black/20 p-3"><p className="text-xs text-muted-foreground">id_pdv</p><p className="text-sm font-semibold">{normalizedUserResponse.id_pdv ?? "-"}</p></div>
-                  <div className="rounded-lg border border-white/10 bg-black/20 p-3"><p className="text-xs text-muted-foreground">subcategoria</p><p className="text-sm font-semibold">{normalizedUserResponse.subcategoria ?? "-"}</p></div>
-                  <div className="rounded-lg border border-white/10 bg-black/20 p-3"><p className="text-xs text-muted-foreground">usuario_relevo</p><p className="text-sm font-semibold">{normalizedUserResponse.usuario_relevo ?? "-"}</p></div>
-                </div>
-              ) : null}
-              {dedupeSummary ? (
-                <div className="space-y-2 rounded-lg border border-white/10 bg-black/20 p-3">
-                  <p className="text-xs font-semibold tracking-wide text-slate-300">Consolidacion / Deduplicacion</p>
-                  <div className="grid gap-3 sm:grid-cols-4">
-                    <div><p className="text-xs text-muted-foreground">Antes</p><p className="text-base font-semibold">{dedupeSummary.before ?? "-"}</p></div>
-                    <div><p className="text-xs text-muted-foreground">Despues</p><p className="text-base font-semibold">{dedupeSummary.after ?? "-"}</p></div>
-                    <div><p className="text-xs text-muted-foreground">Eliminados</p><p className="text-base font-semibold">{dedupeSummary.removed ?? "-"}</p></div>
-                    <div><p className="text-xs text-muted-foreground">Estado</p><p className="text-base font-semibold">{typeof dedupeSummary.enabled === "boolean" ? (dedupeSummary.enabled ? "Activo" : "Inactivo") : "-"}</p></div>
-                  </div>
-                  {typeof dedupeSummary.removed === "number" && dedupeSummary.removed > 0 ? (
-                    <div className="rounded-md border border-amber-300/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-100">
-                      Se consolidaron productos similares para evitar duplicados.
-                    </div>
-                  ) : null}
-                </div>
-              ) : null}
-
-              <div className="flex flex-wrap gap-2">
-                {resultsQuery.data?.master_html_url ? <a href={resolveArtifactPreviewUrl(resultsQuery.data.master_html_url) ?? resultsQuery.data.master_html_url} target="_blank" rel="noreferrer"><Button size="sm"><FileText className="mr-2 h-4 w-4" />Abrir Master HTML</Button></a> : null}
-                {resultsQuery.data?.master_json_url ? <a href={resolveArtifactPreviewUrl(resultsQuery.data.master_json_url) ?? resultsQuery.data.master_json_url} target="_blank" rel="noreferrer"><Button size="sm" variant="outline"><FileJson2 className="mr-2 h-4 w-4" />Abrir Master JSON</Button></a> : null}
-                {resultsQuery.data?.excel_url ? <a href={resolveArtifactPreviewUrl(resultsQuery.data.excel_url) ?? resultsQuery.data.excel_url} target="_blank" rel="noreferrer"><Button size="sm" variant="outline"><FileSpreadsheet className="mr-2 h-4 w-4" />Descargar Excel</Button></a> : null}
-              </div>
-            </CardContent>
-          </Card>
-        </div>
-      </div>
+        <JobOverviewView
+          jobId={jobId}
+          resolvedAccount={resolvedAccount}
+          isTerminal={isTerminal}
+          jobLoading={jobQuery.isLoading}
+          jobError={Boolean(jobQuery.error)}
+          jobData={jobQuery.data}
+          getStatusVariant={getStatusVariant}
+          formatDate={formatDate}
+          images={images}
+          totalProducts={totalProducts}
+          totalPromotions={totalPromotions}
+          totalBarcodes={totalBarcodes}
+          needsReviewCount={needsReviewCount}
+          chainDiagnostics={chainDiagnostics}
+          normalizedUserResponse={normalizedUserResponse as Record<string, unknown> | null | undefined}
+          dedupeSummary={dedupeSummary as Record<string, unknown> | null | undefined}
+          resultsLoading={resultsQuery.isLoading}
+          resultsFetching={resultsQuery.isFetching}
+          resultsPendingMessage={resultsPendingMessage}
+          resultsErrorDetail={
+            resultsQuery.error instanceof HttpError && resultsQuery.error.status !== 404
+              ? resultsQuery.error.detail
+              : null
+          }
+          masterHtmlUrl={resultsQuery.data?.master_html_url}
+          masterJsonUrl={resultsQuery.data?.master_json_url}
+          excelUrl={resultsQuery.data?.excel_url}
+          resolveArtifactPreviewUrl={resolveArtifactPreviewUrl}
+          onLoadResults={() => void loadResults()}
+          onNavigate={setActiveView}
+          onSelectImage={setSelectedImage}
+          imageProcessCodeInput={imageProcessCodeInput}
+          onImageProcessCodeInputChange={setImageProcessCodeInput}
+          onLookupByCode={() => lookupByCodeMutation.mutate()}
+          onReprocessByCode={() => reprocessByCodeMutation.mutate()}
+          lookupPending={lookupByCodeMutation.isPending}
+          reprocessPending={reprocessByCodeMutation.isPending}
+          lookupResult={lookupResult}
+          reprocessJobId={reprocessJobId}
+        />
       ) : null}
 
       {activeView === "visual" ? (

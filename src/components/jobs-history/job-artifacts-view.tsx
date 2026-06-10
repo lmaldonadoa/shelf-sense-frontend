@@ -11,7 +11,7 @@ import {
 } from "lucide-react";
 import type { JobImage } from "@/types/ocr-api";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -96,16 +96,18 @@ function ArtifactActionButton({ item }: { item: ArtifactActionItem }) {
   if (!item.href) return null;
 
   return (
-    <a href={item.href} target="_blank" rel="noreferrer" className="block">
-      <Button
-        size="sm"
-        variant="outline"
-        className="h-auto min-h-9 w-full justify-start whitespace-normal px-3 py-2 text-left text-xs"
-      >
-        {item.icon ? <span className="mr-2 shrink-0">{item.icon}</span> : null}
-        <span className="leading-snug">{item.label}</span>
-        <ExternalLink className="ml-auto h-3 w-3 shrink-0 opacity-50" />
-      </Button>
+    <a
+      href={item.href}
+      target="_blank"
+      rel="noreferrer"
+      className={cn(
+        buttonVariants({ variant: "outline", size: "sm" }),
+        "h-auto min-h-9 w-full justify-start whitespace-normal px-3 py-2 text-left text-xs",
+      )}
+    >
+      {item.icon ? <span className="mr-2 shrink-0">{item.icon}</span> : null}
+      <span className="leading-snug">{item.label}</span>
+      <ExternalLink className="ml-auto h-3 w-3 shrink-0 opacity-50" />
     </a>
   );
 }
@@ -381,39 +383,43 @@ function ImageArtifactMobileCard({
     actionGroups.primary[0];
 
   return (
-    <button
-      type="button"
-      onClick={onSelect}
+    <div
       className={cn(
-        "w-full rounded-lg border p-3 text-left transition-colors",
+        "w-full rounded-lg border p-3 transition-colors",
         selected
           ? "border-cyan-400/50 bg-cyan-500/10 ring-1 ring-cyan-400/30"
-          : "border-white/10 bg-black/20 hover:bg-black/30",
+          : "border-white/10 bg-black/20",
       )}
     >
-      <div className="space-y-2">
-        <div className="flex items-start justify-between gap-2">
-          <p className="line-clamp-2 text-sm font-semibold text-white">{imageLabel(image)}</p>
-          {needsReview(image) ? <Badge variant="destructive">review</Badge> : null}
-        </div>
-        <div className="flex flex-wrap gap-1.5 text-[11px] text-slate-300">
-          <span className="font-mono">{image.image_process_code ?? "-"}</span>
-          <span>·</span>
-          <span>{image.status}</span>
-          {image.processing_status ? (
-            <>
-              <span>·</span>
-              <span>{image.processing_status}</span>
-            </>
-          ) : null}
-        </div>
-        {primaryAction?.onClick || primaryAction?.href ? (
-          <div onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()}>
-            <ArtifactActionButton item={primaryAction} />
+      <button
+        type="button"
+        onClick={onSelect}
+        className="w-full rounded-md text-left transition-colors hover:bg-black/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400/40"
+      >
+        <div className="space-y-2">
+          <div className="flex items-start justify-between gap-2">
+            <p className="line-clamp-2 text-sm font-semibold text-white">{imageLabel(image)}</p>
+            {needsReview(image) ? <Badge variant="destructive">review</Badge> : null}
           </div>
-        ) : null}
-      </div>
-    </button>
+          <div className="flex flex-wrap gap-1.5 text-[11px] text-slate-300">
+            <span className="font-mono">{image.image_process_code ?? "-"}</span>
+            <span>·</span>
+            <span>{image.status}</span>
+            {image.processing_status ? (
+              <>
+                <span>·</span>
+                <span>{image.processing_status}</span>
+              </>
+            ) : null}
+          </div>
+        </div>
+      </button>
+      {primaryAction?.onClick || primaryAction?.href ? (
+        <div className="mt-2">
+          <ArtifactActionButton item={primaryAction} />
+        </div>
+      ) : null}
+    </div>
   );
 }
 
