@@ -1300,7 +1300,11 @@ export const ocrApi = {
     return typeof body === "string" ? body : JSON.stringify(body, null, 2);
   },
 
-  listRecentJobs: async ({ accountName, limit = 20 }: { accountName?: string; limit?: number } = {}): Promise<RecentJob[]> => {
+  listRecentJobs: async ({
+    accountName,
+    limit = 20,
+    jobModule,
+  }: { accountName?: string; limit?: number; jobModule?: string } = {}): Promise<RecentJob[]> => {
     const parseRows = (body: unknown): RecentJob[] => {
       const rows = Array.isArray(body)
         ? body
@@ -1321,6 +1325,7 @@ export const ocrApi = {
       const params = new URLSearchParams();
       params.set("limit", String(limit));
       if (withAccountFilter && accountName) params.set("account_name", accountName);
+      if (jobModule?.trim()) params.set("job_module", jobModule.trim());
       return request(`/v1/ops/jobs/recent?${params.toString()}`, { method: "GET" }, "No se pudo consultar jobs recientes");
     };
 
@@ -3197,7 +3202,11 @@ export const ocrApi = {
     };
   },
 
-  listShelfJobs: async (accountName: string, limit = 100): Promise<RecentJob[]> => {
+  listShelfJobs: async (
+    accountName: string,
+    limit = 100,
+    options: { processing_mode?: string; job_type?: string } = {},
+  ): Promise<RecentJob[]> => {
     const parseShelfJobListBody = (body: unknown): RecentJob[] => {
       const rows = Array.isArray(body)
         ? body
@@ -3247,10 +3256,12 @@ export const ocrApi = {
     try {
       const params = new URLSearchParams();
       params.set("limit", String(limit));
+      if (options.processing_mode?.trim()) params.set("processing_mode", options.processing_mode.trim());
+      if (options.job_type?.trim()) params.set("job_type", options.job_type.trim());
       const body = await request(
         `/v1/accounts/${encodeURIComponent(accountName)}/shelf/jobs?${params.toString()}`,
         { method: "GET" },
-        "No se pudieron listar los jobs Shelf",
+        "No se pudieron listar los jobs Shelf"
       );
       dedicatedRows = parseShelfJobListBody(body);
     } catch (error) {
@@ -3259,12 +3270,19 @@ export const ocrApi = {
       }
     }
 
-    const recentRows = (await ocrApi.listRecentJobs({ accountName, limit: Math.max(limit, 100) }))
+    if (dedicatedRows.length >= limit) {
+      return dedicatedRows.slice(0, limit);
+    }
+
+    const recentRows = (await ocrApi.listRecentJobs({
+      accountName,
+      limit: Math.max(limit, 100),
+      jobModule: "shelf_recognition",
+    }))
       .filter(isShelfModuleJob)
       .filter((row) => !row.account_name || row.account_name === accountName);
 
-    const merged = mergeShelfJobs(dedicatedRows, recentRows);
-    return merged.slice(0, limit);
+    return mergeShelfJobs(dedicatedRows, recentRows).slice(0, limit);
   },
 
   createShelfJob: async (payload: CreateShelfJobRequest): Promise<CreateShelfJobResponse> => {
