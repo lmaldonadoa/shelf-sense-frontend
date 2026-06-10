@@ -3197,6 +3197,35 @@ export const ocrApi = {
     };
   },
 
+  listShelfJobs: async (accountName: string, limit = 100): Promise<RecentJob[]> => {
+    try {
+      const params = new URLSearchParams();
+      params.set("limit", String(limit));
+      const body = await request(
+        `/v1/accounts/${encodeURIComponent(accountName)}/shelf/jobs?${params.toString()}`,
+        { method: "GET" },
+        "No se pudieron listar los jobs Shelf"
+      );
+      const rows = Array.isArray(body)
+        ? body
+        : body && typeof body === "object" && Array.isArray((body as Record<string, unknown>).jobs)
+          ? ((body as Record<string, unknown>).jobs as unknown[])
+          : Array.isArray((body as Record<string, unknown>).items)
+            ? ((body as Record<string, unknown>).items as unknown[])
+            : [];
+      return rows
+        .map(normalizeRecentJob)
+        .filter((row) => getJobId(row).length > 0)
+        .sort((a, b) => {
+          const aTime = new Date(a.created_at || 0).getTime();
+          const bTime = new Date(b.created_at || 0).getTime();
+          return bTime - aTime;
+        });
+    } catch {
+      return [];
+    }
+  },
+
   createShelfJob: async (payload: CreateShelfJobRequest): Promise<CreateShelfJobResponse> => {
     const body = await request(
       `/v1/shelf/jobs`,
@@ -3328,20 +3357,35 @@ export const ocrApi = {
   seedShelfSkus: async (accountName: string, items: Record<string, unknown>[]): Promise<Record<string, unknown>> => {
     const body = await request(
       `/v1/accounts/${encodeURIComponent(accountName)}/shelf/skus/seed`,
-      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ items }) },
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ items, fail_on_error: false }) },
       "No se pudo sembrar/actualizar SKUs Shelf",
       120000,
     );
     return (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
   },
 
-  listShelfSkus: async (accountName: string, limit = 300, query?: string): Promise<ShelfSku[]> => {
+  listShelfSkuCategories: async (accountName: string): Promise<Array<{ categoria: string; count_total: number; count_active: number }>> => {
+    const body = await request(
+      `/v1/accounts/${encodeURIComponent(accountName)}/shelf/skus/categories`,
+      { method: "GET" },
+      "No se pudo listar categorías de SKUs Shelf",
+    );
+    const data = (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
+    const categories = Array.isArray(data.categories) ? data.categories : [];
+    return categories as Array<{ categoria: string; count_total: number; count_active: number }>;
+  },
+
+  listShelfSkus: async (accountName: string, limit = 300, query?: string, categoria?: string): Promise<ShelfSku[]> => {
     const params = new URLSearchParams();
     params.set("limit", String(limit));
     const q = query?.trim();
     if (q) {
       params.set("q", q);
       params.set("search", q);
+    }
+    const cat = categoria?.trim();
+    if (cat) {
+      params.set("categoria", cat);
     }
     const body = await request(
       `/v1/accounts/${encodeURIComponent(accountName)}/shelf/skus?${params.toString()}`,

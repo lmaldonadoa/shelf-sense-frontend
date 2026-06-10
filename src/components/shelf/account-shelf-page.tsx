@@ -98,39 +98,90 @@ function normalizeBulkShelfSeedRow(row: Record<string, unknown>): Record<string,
     "stack",
     "tamanoX",
     "tamanoY",
-    "segment",
-    "subcategory",
-    "categoryCuenta",
-    "country",
   ];
   const metadataEntries = metadataSourceKeys
     .filter((key) => Object.prototype.hasOwnProperty.call(row, key))
     .map((key) => [key, row[key]]);
   const metadata = metadataEntries.length ? Object.fromEntries(metadataEntries) : undefined;
 
-  return {
+  // Helper para convertir números a string (especialmente para pais)
+  const toStringOrUndefined = (value: unknown): string | undefined => {
+    if (value === null || value === undefined || value === "") return undefined;
+    return String(value).trim() || undefined;
+  };
+
+  // Helper para convertir a número float
+  const toNumberOrUndefined = (value: unknown): number | undefined => {
+    if (value === null || value === undefined || value === "" || value === 0) return undefined;
+    const num = Number(value);
+    return isNaN(num) ? undefined : num;
+  };
+
+  const result: Record<string, unknown> = {
     sku_id: skuId,
     nombre,
-    marca: firstNonEmptyString(row.marca, row.brand),
-    categoria: firstNonEmptyString(row.categoria, row.category, row.family),
-    subcategoria: firstNonEmptyString(row.subcategoria, row.subcategory),
-    segmento: firstNonEmptyString(row.segmento, row.segment),
-    forma: firstNonEmptyString(row.forma, row.formato, row.variant, row.presentation),
-    fabricante: firstNonEmptyString(row.fabricante),
-    fragancia_variante: firstNonEmptyString(row.fragancia_variante, row.fraganciaVariante),
-    tamano: firstNonEmptyString(row.tamano, row.size_text, row.size),
-    ean: firstNonEmptyString(row.ean, row.barcode, row.upc),
-    category_cuenta: firstNonEmptyString(row.category_cuenta, row.categoryCuenta),
-    x_ancho: firstNonEmptyString(row.x_ancho, row.x),
-    y_alto: firstNonEmptyString(row.y_alto, row.y),
-    z_profundidad: firstNonEmptyString(row.z_profundidad, row.z),
-    segmento_funcional: firstNonEmptyString(row.segmento_funcional, row.segmentoFuncional),
-    pais: firstNonEmptyString(row.pais, row.country),
-    grupo: firstNonEmptyString(row.grupo),
-    estado: firstNonEmptyString(row.estado, row.status, "activo"),
-    is_active: row.is_active === false || row.is_active === 0 ? false : true,
-    metadata,
   };
+
+  // Mapear campos opcionales string
+  const brandVal = firstNonEmptyString(row.marca, row.brand);
+  if (brandVal) result.marca = brandVal;
+
+  const categoryVal = firstNonEmptyString(row.categoria, row.category, row.family);
+  if (categoryVal) result.categoria = categoryVal;
+
+  const subcategoryVal = firstNonEmptyString(row.subcategoria, row.subcategory);
+  if (subcategoryVal) result.subcategoria = subcategoryVal;
+
+  const segmentVal = firstNonEmptyString(row.segmento, row.segment);
+  if (segmentVal) result.segmento = segmentVal;
+
+  const formVal = firstNonEmptyString(row.forma, row.formato, row.variant, row.presentation);
+  if (formVal) result.forma = formVal;
+
+  const fabVal = firstNonEmptyString(row.fabricante);
+  if (fabVal) result.fabricante = fabVal;
+
+  const fragVal = firstNonEmptyString(row.fragancia_variante, row.fraganciaVariante);
+  if (fragVal) result.fragancia_variante = fragVal;
+
+  const sizeVal = firstNonEmptyString(row.tamano, row.size_text, row.size);
+  if (sizeVal) result.tamano = sizeVal;
+
+  const eanVal = firstNonEmptyString(row.ean, row.barcode, row.upc);
+  if (eanVal) result.ean = eanVal;
+
+  const catCuentaVal = firstNonEmptyString(row.category_cuenta, row.categoryCuenta);
+  if (catCuentaVal) result.category_cuenta = catCuentaVal;
+
+  const segFuncVal = firstNonEmptyString(row.segmento_funcional, row.segmentoFuncional);
+  if (segFuncVal) result.segmento_funcional = segFuncVal;
+
+  const grupoVal = firstNonEmptyString(row.grupo);
+  if (grupoVal) result.grupo = grupoVal;
+
+  // CRÍTICO: pais DEBE ser string, no número
+  const paisVal = toStringOrUndefined(row.pais ?? row.country);
+  if (paisVal) result.pais = paisVal;
+
+  // Dimensiones como números float
+  const xVal = toNumberOrUndefined(row.x_ancho ?? row.x);
+  if (xVal !== undefined) result.x_ancho = xVal;
+
+  const yVal = toNumberOrUndefined(row.y_alto ?? row.y);
+  if (yVal !== undefined) result.y_alto = yVal;
+
+  const zVal = toNumberOrUndefined(row.z_profundidad ?? row.z);
+  if (zVal !== undefined) result.z_profundidad = zVal;
+
+  // Campos por defecto
+  const estadoVal = firstNonEmptyString(row.estado, row.status);
+  result.estado = estadoVal || "activo";
+
+  result.is_active = row.is_active === false || row.is_active === 0 ? false : true;
+
+  if (metadata) result.metadata = metadata;
+
+  return result;
 }
 
 function asString(v: unknown): string {
@@ -159,7 +210,8 @@ function getSkuBrandValue(sku: ShelfSku): string {
 }
 
 function getSkuFamilyValue(sku: ShelfSku): string {
-  return firstNonEmptyString((sku as Record<string, unknown>).family, (sku as Record<string, unknown>).categoria);
+  // Prioriza categoria (donde se normalizan los datos) sobre family
+  return firstNonEmptyString((sku as Record<string, unknown>).categoria, (sku as Record<string, unknown>).family);
 }
 
 function getSkuSubcategoryValue(sku: ShelfSku): string {
@@ -1047,14 +1099,26 @@ export function AccountShelfPage({ account }: Props) {
 
   const recentShelfJobsQuery = useQuery({
     queryKey: ["recent-shelf-jobs", account],
-    queryFn: () => ocrApi.listRecentJobs({ accountName: account, limit: 80 }),
+    queryFn: () => ocrApi.listShelfJobs(account, 100),
     enabled: shelfEnabled && ["jobs", "results"].includes(tab),
     staleTime: 15_000,
   });
 
+  const skuCategoriesQuery = useQuery({
+    queryKey: ["shelf-sku-categories", account],
+    queryFn: () => ocrApi.listShelfSkuCategories(account),
+    enabled: shelfEnabled && ["skus", "assets", "review", "results"].includes(tab),
+  });
+
   const skusQuery = useQuery({
-    queryKey: ["shelf-skus", account],
-    queryFn: () => ocrApi.listShelfSkus(account, 400),
+    queryKey: ["shelf-skus", account, skuCatalogCategoryFilter],
+    queryFn: () => {
+      const cat = skuCatalogCategoryFilter || undefined;
+      // Sin filtro de categoría: traer todo (limit=5000 cubre los ~2k actuales)
+      // Con filtro: limit=1000 cubre la categoría más grande (JABONES=779)
+      const limit = cat ? 1000 : 5000;
+      return ocrApi.listShelfSkus(account, limit, undefined, cat);
+    },
     enabled: shelfEnabled && ["skus", "assets", "review", "results"].includes(tab),
   });
 
@@ -2291,15 +2355,21 @@ export function AccountShelfPage({ account }: Props) {
   const skuCatalogOptions = useMemo(() => {
     const rows = skusQuery.data ?? [];
     const collect = (getter: (sku: ShelfSku) => string) => Array.from(new Set(rows.map(getter).filter(Boolean))).sort((a, b) => a.localeCompare(b));
+
+    // Usar el endpoint dedicado para categorías (siempre tiene todas)
+    const categories = skuCategoriesQuery.data
+      ? skuCategoriesQuery.data.map((c) => c.categoria).sort((a, b) => a.localeCompare(b))
+      : collect(getSkuFamilyValue);
+
     return {
-      categories: collect(getSkuFamilyValue),
+      categories,
       subcategories: collect(getSkuSubcategoryValue),
       segments: collect(getSkuSegmentValue),
       manufacturers: collect(getSkuManufacturerValue),
       brands: collect(getSkuBrandValue),
       groups: collect(getSkuGroupValue),
     };
-  }, [skusQuery.data]);
+  }, [skusQuery.data, skuCategoriesQuery.data]);
 
   const selectedSkuCatalogDetail = useMemo(() => {
     const code = skuCatalogDetailCode.trim();
@@ -4775,7 +4845,8 @@ export function AccountShelfPage({ account }: Props) {
                   <p className="text-xs text-slate-300">Busca por SKU, nombre, marca, categoría, subcategoría o fabricante. También puedes revisar la ficha completa antes de usarlo.</p>
                 </div>
                 <div className="flex flex-wrap gap-2">
-                  <Badge variant="outline">Total: {(skusQuery.data ?? []).length}</Badge>
+                  <Badge variant="outline">Total BD: {skuCategoriesQuery.data ? skuCategoriesQuery.data.reduce((sum, c) => sum + c.count_active, 0) : (skusQuery.data ?? []).length}</Badge>
+                  <Badge variant="outline">Cargados: {(skusQuery.data ?? []).length}</Badge>
                   <Badge variant="outline">Visibles: {filteredSkusCatalog.length}</Badge>
                 </div>
               </div>
@@ -4801,8 +4872,11 @@ export function AccountShelfPage({ account }: Props) {
               </div>
               <div className="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
                 <select className="h-10 rounded-md border border-white/10 bg-slate-900 px-3 text-sm" value={skuCatalogCategoryFilter} onChange={(e) => setSkuCatalogCategoryFilter(e.target.value)}>
-                  <option value="">Todas las categorías</option>
-                  {skuCatalogOptions.categories.map((value) => <option key={`cat-${value}`} value={value}>{value}</option>)}
+                  <option value="">Todas las categorías ({skuCategoriesQuery.data ? skuCategoriesQuery.data.reduce((s, c) => s + c.count_active, 0) : "..."})</option>
+                  {skuCatalogOptions.categories.map((value) => {
+                    const catData = skuCategoriesQuery.data?.find((c) => c.categoria === value);
+                    return <option key={`cat-${value}`} value={value}>{value}{catData ? ` (${catData.count_active})` : ""}</option>;
+                  })}
                 </select>
                 <select className="h-10 rounded-md border border-white/10 bg-slate-900 px-3 text-sm" value={skuCatalogSubcategoryFilter} onChange={(e) => setSkuCatalogSubcategoryFilter(e.target.value)}>
                   <option value="">Todas las subcategorías</option>
@@ -5187,7 +5261,14 @@ export function AccountShelfPage({ account }: Props) {
                       toast.error("No hay filas validas para crear.");
                       return;
                     }
-                    setBulkDataForUpload(rows);
+                    const normalized = rows
+                      .map((row) => normalizeBulkShelfSeedRow(row))
+                      .filter((row): row is Record<string, unknown> => Boolean(row));
+                    if (!normalized.length) {
+                      toast.error("Ninguna fila tiene sku_id y nombre válidos.");
+                      return;
+                    }
+                    setBulkDataForUpload(normalized);
                     setShowBulkUploadSafeguard(true);
                   }}
                   disabled={bulkCreateMutation.isPending || showBulkUploadSafeguard}
