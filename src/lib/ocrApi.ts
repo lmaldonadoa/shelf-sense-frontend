@@ -115,6 +115,13 @@ import type {
   ChainUpsertRequest,
   ChainAliasUpsertRequest,
   ChainIgnoredPhraseUpsertRequest,
+  AccountIgnoredPhraseCreateRequest,
+  AccountIgnoredPhrasePatchRequest,
+  AccountIgnoredPhrase,
+  AccountIgnoredPhrasesResponse,
+  IgnoredPhraseSuggestion,
+  IgnoredPhraseSuggestionExample,
+  IgnoredPhraseSuggestionsResponse,
   ChainResolvePreviewResponse,
   AccountPromptFileItem,
   AccountPromptListResponse,
@@ -1539,6 +1546,30 @@ export const ocrApi = {
     return ocrApi.upsertConfig(accountName, payload);
   },
 
+  getPromotionsConfig: async (accountName: string, configName = "default"): Promise<Record<string, unknown>> => {
+    const params = new URLSearchParams();
+    params.set("config_name", configName);
+    const body = await request(
+      `/v1/accounts/${encodeURIComponent(accountName)}/promotions/config?${params.toString()}`,
+      { method: "GET" },
+      "No se pudo obtener config de promociones",
+    );
+    return (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
+  },
+
+  patchPromotionsConfig: async (accountName: string, patch: Record<string, unknown>, configName = "default"): Promise<Record<string, unknown>> => {
+    const body = await request(
+      `/v1/accounts/${encodeURIComponent(accountName)}/promotions/config`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ config_name: configName, is_active: true, ...patch }),
+      },
+      "No se pudo actualizar config de promociones",
+    );
+    return (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
+  },
+
   getRagEffectiveness: async (
     accountName: string,
     params?: { period_days?: number },
@@ -1668,6 +1699,122 @@ export const ocrApi = {
       "No se pudo eliminar frase ignorada de cadena",
     );
     return (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
+  },
+
+  listAccountIgnoredPhrases: async (accountName: string, scope?: string): Promise<AccountIgnoredPhrasesResponse> => {
+    const q = scope ? `?scope=${encodeURIComponent(scope)}` : "";
+    const body = await request(
+      `/v1/accounts/${encodeURIComponent(accountName)}/ignored-phrases${q}`,
+      { method: "GET" },
+      "No se pudo consultar frases ignoradas de cuenta",
+    );
+    const data = (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
+    const rows = Array.isArray(data.ignored_phrases)
+      ? data.ignored_phrases
+      : Array.isArray(data.phrases)
+        ? data.phrases
+        : [];
+    const phrases: AccountIgnoredPhrase[] = rows.map((row) => {
+      const x = (row && typeof row === "object" ? row : {}) as Record<string, unknown>;
+      return {
+        id: typeof x.id === "number" ? x.id : Number(x.id ?? -1),
+        phrase: typeof x.phrase === "string" ? x.phrase : "",
+        scope: typeof x.scope === "string" ? x.scope : "name",
+        chain_whitelist: Array.isArray(x.chain_whitelist) ? x.chain_whitelist.map((c) => String(c)).filter(Boolean) : [],
+        is_active: typeof x.is_active === "number" || typeof x.is_active === "boolean" ? (x.is_active as number | boolean) : 1,
+        created_at: typeof x.created_at === "string" ? x.created_at : undefined,
+        updated_at: typeof x.updated_at === "string" ? x.updated_at : undefined,
+      };
+    }).filter((p) => p.phrase.length > 0);
+    return {
+      account_name: typeof data.account_name === "string" ? data.account_name : accountName,
+      ignored_phrases: phrases,
+      name_noise_seed_info: data.name_noise_seed_info && typeof data.name_noise_seed_info === "object"
+        ? (data.name_noise_seed_info as AccountIgnoredPhrasesResponse["name_noise_seed_info"])
+        : null,
+    };
+  },
+
+  createAccountIgnoredPhrase: async (accountName: string, payload: AccountIgnoredPhraseCreateRequest): Promise<AccountIgnoredPhrase> => {
+    const body = await request(
+      `/v1/accounts/${encodeURIComponent(accountName)}/ignored-phrases`,
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) },
+      "No se pudo crear frase ignorada",
+    );
+    const x = (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
+    return {
+      id: typeof x.id === "number" ? x.id : Number(x.id ?? -1),
+      phrase: typeof x.phrase === "string" ? x.phrase : payload.phrase,
+      scope: typeof x.scope === "string" ? x.scope : payload.scope,
+      chain_whitelist: Array.isArray(x.chain_whitelist) ? x.chain_whitelist.map((c) => String(c)).filter(Boolean) : payload.chain_whitelist ?? [],
+      is_active: typeof x.is_active === "number" || typeof x.is_active === "boolean" ? (x.is_active as number | boolean) : 1,
+      created_at: typeof x.created_at === "string" ? x.created_at : undefined,
+      updated_at: typeof x.updated_at === "string" ? x.updated_at : undefined,
+    };
+  },
+
+  patchAccountIgnoredPhrase: async (accountName: string, ignoredId: number, payload: AccountIgnoredPhrasePatchRequest): Promise<AccountIgnoredPhrase> => {
+    const body = await request(
+      `/v1/accounts/${encodeURIComponent(accountName)}/ignored-phrases/${encodeURIComponent(String(ignoredId))}`,
+      { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) },
+      "No se pudo actualizar frase ignorada",
+    );
+    const x = (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
+    return {
+      id: typeof x.id === "number" ? x.id : ignoredId,
+      phrase: typeof x.phrase === "string" ? x.phrase : "",
+      scope: typeof x.scope === "string" ? x.scope : "name",
+      chain_whitelist: Array.isArray(x.chain_whitelist) ? x.chain_whitelist.map((c) => String(c)).filter(Boolean) : [],
+      is_active: typeof x.is_active === "number" || typeof x.is_active === "boolean" ? (x.is_active as number | boolean) : 1,
+      created_at: typeof x.created_at === "string" ? x.created_at : undefined,
+      updated_at: typeof x.updated_at === "string" ? x.updated_at : undefined,
+    };
+  },
+
+  deleteAccountIgnoredPhrase: async (accountName: string, ignoredId: number): Promise<Record<string, unknown>> => {
+    const body = await request(
+      `/v1/accounts/${encodeURIComponent(accountName)}/ignored-phrases/${encodeURIComponent(String(ignoredId))}`,
+      { method: "DELETE" },
+      "No se pudo eliminar frase ignorada",
+    );
+    return (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
+  },
+
+  getJobIgnoredPhraseSuggestions: async (jobId: string): Promise<IgnoredPhraseSuggestionsResponse> => {
+    const body = await request(
+      `/v1/jobs/${encodeURIComponent(jobId)}/ignored-phrases/suggestions`,
+      { method: "GET" },
+      "No se pudieron cargar sugerencias de ruido",
+    );
+    const raw = (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
+    const parseExample = (e: unknown): { snippet: string; image_process_code?: string | null; source_kind?: string | null } => {
+      const ex = (e && typeof e === "object" ? e : {}) as Record<string, unknown>;
+      return {
+        snippet: typeof ex.snippet === "string" ? ex.snippet : "",
+        image_process_code: typeof ex.image_process_code === "string" ? ex.image_process_code : null,
+        source_kind: typeof ex.source_kind === "string" ? ex.source_kind : null,
+      };
+    };
+    const parseSuggestion = (item: unknown): IgnoredPhraseSuggestion => {
+      const x = (item && typeof item === "object" ? item : {}) as Record<string, unknown>;
+      return {
+        phrase: typeof x.phrase === "string" ? x.phrase : "",
+        confidence: typeof x.confidence === "number" ? x.confidence : 0,
+        occurrences: typeof x.occurrences === "number" ? x.occurrences : 0,
+        image_process_codes: Array.isArray(x.image_process_codes) ? x.image_process_codes.map(String) : [],
+        source_kinds: Array.isArray(x.source_kinds) ? x.source_kinds.map(String) : [],
+        snippet: typeof x.snippet === "string" ? x.snippet : null,
+        examples: Array.isArray(x.examples) ? x.examples.map(parseExample) : [],
+        already_exists: typeof x.already_exists === "boolean" ? x.already_exists : false,
+      };
+    };
+    return {
+      phrase_suggestions: Array.isArray(raw.phrase_suggestions) ? raw.phrase_suggestions.map(parseSuggestion) : [],
+      support_noise_candidates: Array.isArray(raw.support_noise_candidates) ? raw.support_noise_candidates.map(parseSuggestion) : [],
+      summary: raw.summary && typeof raw.summary === "object" ? raw.summary as IgnoredPhraseSuggestionsResponse["summary"] : undefined,
+      job_context: raw.job_context && typeof raw.job_context === "object" ? raw.job_context as IgnoredPhraseSuggestionsResponse["job_context"] : undefined,
+      apply_hint: raw.apply_hint && typeof raw.apply_hint === "object" ? raw.apply_hint as IgnoredPhraseSuggestionsResponse["apply_hint"] : undefined,
+    };
   },
 
   listAccountPrompts: async (accountName: string, slot: "ocr" | "vision" | string): Promise<AccountPromptListResponse> => {

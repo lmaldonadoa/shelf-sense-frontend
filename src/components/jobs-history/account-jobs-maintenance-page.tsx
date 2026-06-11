@@ -3,17 +3,16 @@
 import { useMemo, useState } from "react";
 import Link from "next/link";
 import { useMutation } from "@tanstack/react-query";
-import { AlertTriangle, Loader2, RefreshCcw, ShieldAlert, Trash2 } from "lucide-react";
+import { AlertTriangle, FileCheck, Info, Loader2, RefreshCcw, Shield, ShieldAlert, Trash2, Wrench } from "lucide-react";
 import { toast } from "sonner";
 import { HttpError, ocrApi } from "@/lib/ocrApi";
-import type { JobsMaintenanceAuditItem, JobsMaintenanceAuditResponse } from "@/types/ocr-api";
+import type { JobsMaintenanceAuditItem, JobsMaintenanceAuditResponse, JobsMaintenanceInferredOutputSignature } from "@/types/ocr-api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
 
 type Props = { account: string };
@@ -31,19 +30,45 @@ function numberValue(value: unknown): number {
 }
 
 function healthBadge(health?: string | null) {
-  if (health === "ok") return <Badge>OK</Badge>;
-  if (health === "broken") return <Badge variant="destructive">Roto</Badge>;
-  return <Badge variant="outline">{health || "-"}</Badge>;
+  if (health === "ok") return <Badge className="h-5 border-emerald-400/40 bg-emerald-500/15 text-[10px] text-emerald-100">OK</Badge>;
+  if (health === "recoverable")
+    return (
+      <Badge className="h-5 border-amber-400/40 bg-amber-500/15 text-[10px] text-amber-100" title="Faltan referencias en DB, pero backend detectó artifacts válidos en output. No se recomienda borrar este job.">
+        Recuperable
+      </Badge>
+    );
+  if (health === "broken")
+    return (
+      <Badge variant="destructive" className="h-5 text-[10px]" title="Backend no detectó evidencia suficiente para recuperar artifacts ni referencias válidas.">
+        Roto
+      </Badge>
+    );
+  return <Badge variant="outline" className="h-5 text-[10px]">{health || "-"}</Badge>;
 }
 
 function issueBadges(item: JobsMaintenanceAuditItem) {
   const issues = Array.isArray(item.issues) ? item.issues : [];
-  if (!issues.length) return <span className="text-xs text-slate-400">Sin incidencias reportadas</span>;
+  if (!issues.length) return <span className="text-[11px] text-slate-500">Sin incidencias</span>;
   return (
-    <div className="flex flex-wrap gap-2">
-      {issues.map((issue) => (
-        <Badge key={`${item.job_id}-${issue}`} variant="outline">
+    <div className="flex flex-wrap gap-1">
+      {issues.slice(0, 4).map((issue) => (
+        <Badge key={`${item.job_id}-${issue}`} variant="outline" className="h-5 text-[10px]">
           {issue}
+        </Badge>
+      ))}
+      {issues.length > 4 ? <span className="text-[10px] text-slate-500">+{issues.length - 4}</span> : null}
+    </div>
+  );
+}
+
+function recoverableReasonsList(item: JobsMaintenanceAuditItem) {
+  const reasons = Array.isArray(item.recoverable_reasons) ? item.recoverable_reasons : [];
+  if (!reasons.length) return null;
+  return (
+    <div className="mt-1 flex flex-wrap gap-1">
+      {reasons.map((reason, idx) => (
+        <Badge key={`${item.job_id}-rec-${idx}`} className="h-5 border-amber-400/30 bg-amber-500/10 text-[10px] text-amber-200">
+          {reason}
         </Badge>
       ))}
     </div>
@@ -56,16 +81,84 @@ function filesSummary(item: JobsMaintenanceAuditItem): string {
   const sourceNotDeleted = Array.isArray(item.files?.existing_source_not_deleted) ? item.files.existing_source_not_deleted.length : 0;
   const parts: string[] = [];
   if (missing) parts.push(`${missing} faltantes`);
-  if (generated) parts.push(`${generated} generados`);
-  if (sourceNotDeleted) parts.push(`${sourceNotDeleted} source`);
-  return parts.length ? parts.join(" / ") : "-";
+  if (generated) parts.push(`${generated} gen.`);
+  if (sourceNotDeleted) parts.push(`${sourceNotDeleted} src`);
+  return parts.length ? parts.join(" · ") : "-";
 }
 
 function renderJsonBlock(title: string, value: unknown) {
   return (
-    <div className="rounded-xl border border-white/10 bg-black/20 p-3 text-xs">
-      <p className="mb-2 font-medium text-slate-100">{title}</p>
-      <pre className="max-h-44 overflow-auto whitespace-pre-wrap break-all text-slate-300">{JSON.stringify(value ?? {}, null, 2)}</pre>
+    <div className="rounded-lg border border-white/10 bg-black/20 p-2.5 text-xs">
+      <p className="mb-1.5 font-medium text-slate-100">{title}</p>
+      <pre className="max-h-36 overflow-auto whitespace-pre-wrap break-all text-[11px] text-slate-300">
+        {JSON.stringify(value ?? {}, null, 2)}
+      </pre>
+    </div>
+  );
+}
+
+function renderOutputSignature(sig: JobsMaintenanceInferredOutputSignature | null | undefined) {
+  if (!sig) return null;
+  const entries: [string, string | null | undefined][] = [
+    ["Master JSON", sig.master_json],
+    ["Master HTML", sig.master_html],
+    ["Master MD", sig.master_md],
+    ["Excel", sig.excel],
+  ];
+  const imageJsonPaths = Array.isArray(sig.image_json_paths) ? sig.image_json_paths : [];
+  const annotatedPaths = Array.isArray(sig.annotated_paths) ? sig.annotated_paths : [];
+  return (
+    <div className="rounded-lg border border-amber-300/20 bg-amber-500/5 p-2.5 text-xs">
+      <div className="mb-1.5 flex items-center gap-1.5">
+        <FileCheck className="h-3.5 w-3.5 text-amber-300" />
+        <p className="font-medium text-amber-100">Evidencia inferida desde output</p>
+      </div>
+      <div className="space-y-0.5">
+        {entries.map(([label, val]) =>
+          val ? (
+            <p key={label} className="text-[11px] text-slate-300">
+              <span className="text-slate-500">{label}:</span> <span className="font-mono">{val}</span>
+            </p>
+          ) : null,
+        )}
+        {imageJsonPaths.length > 0 && (
+          <p className="text-[11px] text-slate-300">
+            <span className="text-slate-500">Image JSONs:</span> {imageJsonPaths.length} archivo(s)
+          </p>
+        )}
+        {annotatedPaths.length > 0 && (
+          <p className="text-[11px] text-slate-300">
+            <span className="text-slate-500">Annotated:</span> {annotatedPaths.length} archivo(s)
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function renderResultPaths(result: JobsMaintenanceAuditItem["result"]) {
+  if (!result) return null;
+  const paths: [string, string | null | undefined][] = [
+    ["Output dir", result.output_dir],
+    ["Master JSON", result.master_json_path],
+    ["Master HTML", result.master_html_path],
+    ["Master MD", result.master_md_path],
+    ["Excel", result.excel_path],
+  ];
+  const hasAny = paths.some(([, val]) => val);
+  if (!hasAny) return null;
+  return (
+    <div className="rounded-lg border border-white/10 bg-black/20 p-2.5 text-xs">
+      <p className="mb-1.5 font-medium text-slate-100">Paths principales</p>
+      <div className="space-y-0.5">
+        {paths.map(([label, val]) =>
+          val ? (
+            <p key={label} className="text-[11px] text-slate-300">
+              <span className="text-slate-500">{label}:</span> <span className="font-mono break-all">{val}</span>
+            </p>
+          ) : null,
+        )}
+      </div>
     </div>
   );
 }
@@ -84,16 +177,31 @@ function SectionSwitch({
   onCheckedChange: (checked: boolean) => void;
 }) {
   return (
-    <div className="rounded-xl border border-white/10 bg-black/20 p-3">
-      <div className="flex items-start justify-between gap-3">
-        <div className="space-y-1">
-          <Label htmlFor={id} className="text-sm text-slate-100">
+    <div className="rounded-lg border border-white/10 bg-black/20 px-2.5 py-2">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0 space-y-0.5">
+          <Label htmlFor={id} className="text-xs text-slate-100">
             {label}
           </Label>
-          <p className="text-xs leading-5 text-slate-400">{help}</p>
+          <p className="text-[11px] leading-4 text-slate-500">{help}</p>
         </div>
         <Switch id={id} checked={checked} onCheckedChange={onCheckedChange} />
       </div>
+    </div>
+  );
+}
+
+function KpiCard({ label, value, variant }: { label: string; value: number; variant?: "default" | "amber" | "destructive" }) {
+  const borderClass =
+    variant === "amber"
+      ? "border-amber-400/20"
+      : variant === "destructive"
+        ? "border-rose-400/20"
+        : "border-white/10";
+  return (
+    <div className={`rounded-xl ${borderClass} bg-black/25 px-3 py-2`}>
+      <p className="text-[10px] uppercase tracking-wide text-slate-400">{label}</p>
+      <p className="mt-0.5 text-lg font-semibold tabular-nums text-white">{value}</p>
     </div>
   );
 }
@@ -115,6 +223,7 @@ export function AccountJobsMaintenancePage({ account }: Props) {
   const [selectedJobForDelete, setSelectedJobForDelete] = useState("");
   const [auditResult, setAuditResult] = useState<JobsMaintenanceAuditResponse | null>(null);
   const [selectedDetail, setSelectedDetail] = useState<JobsMaintenanceAuditItem | null>(null);
+  const [recoverableBlockMessage, setRecoverableBlockMessage] = useState<string | null>(null);
 
   const parsedJobIds = useMemo(
     () =>
@@ -137,17 +246,30 @@ export function AccountJobsMaintenancePage({ account }: Props) {
     };
   }
 
+  function handleHttpError(error: unknown, fallbackTitle: string) {
+    if (error instanceof HttpError) {
+      if (error.status === 409) {
+        const msg = error.detail || "Job recuperable detectado. Borrado bloqueado por seguridad.";
+        setRecoverableBlockMessage(msg);
+        toast.warning("Borrado bloqueado por seguridad", { description: msg });
+        return;
+      }
+      toast.error(fallbackTitle, { description: error.detail });
+      return;
+    }
+    const detail = error instanceof Error ? error.message : "Error inesperado";
+    toast.error(fallbackTitle, { description: detail });
+  }
+
   const auditMutation = useMutation({
     mutationFn: async () => ocrApi.auditJobsMaintenance(baseAuditPayload()),
     onSuccess: (data) => {
       setAuditResult(data);
       setSelectedDetail(null);
+      setRecoverableBlockMessage(null);
       toast.success("Auditoria completada");
     },
-    onError: (error) => {
-      const detail = error instanceof HttpError ? error.detail : error instanceof Error ? error.message : "Error inesperado";
-      toast.error("No se pudo auditar", { description: detail });
-    },
+    onError: (error) => handleHttpError(error, "No se pudo auditar"),
   });
 
   const detailMutation = useMutation({
@@ -155,13 +277,11 @@ export function AccountJobsMaintenancePage({ account }: Props) {
     onSuccess: (data) => {
       const item = Array.isArray(data.items) && data.items.length ? data.items[0] : null;
       setSelectedDetail(item ?? null);
+      setRecoverableBlockMessage(null);
       if (item?.job_id) setSelectedJobForDelete(item.job_id);
       toast.success("Diagnostico cargado");
     },
-    onError: (error) => {
-      const detail = error instanceof HttpError ? error.detail : error instanceof Error ? error.message : "Error inesperado";
-      toast.error("No se pudo consultar el diagnostico", { description: detail });
-    },
+    onError: (error) => handleHttpError(error, "No se pudo consultar el diagnostico"),
   });
 
   const cleanupMutation = useMutation({
@@ -177,12 +297,12 @@ export function AccountJobsMaintenancePage({ account }: Props) {
       }),
     onSuccess: (data, dryRun) => {
       setAuditResult(data);
-      toast.success(dryRun ? "Previsualizacion lista" : "Limpieza ejecutada");
+      setRecoverableBlockMessage(null);
+      const skippedCount = numberValue(data.summary?.jobs_skipped_recoverable);
+      const skippedMsg = skippedCount > 0 ? ` (${skippedCount} recuperables omitidos)` : "";
+      toast.success(dryRun ? `Previsualizacion lista${skippedMsg}` : `Limpieza ejecutada${skippedMsg}`);
     },
-    onError: (error) => {
-      const detail = error instanceof HttpError ? error.detail : error instanceof Error ? error.message : "Error inesperado";
-      toast.error("No se pudo ejecutar la limpieza", { description: detail });
-    },
+    onError: (error) => handleHttpError(error, "No se pudo ejecutar la limpieza"),
   });
 
   const deleteJobMutation = useMutation({
@@ -200,90 +320,77 @@ export function AccountJobsMaintenancePage({ account }: Props) {
     onSuccess: (data, dryRun) => {
       const item = Array.isArray(data.items) && data.items.length ? data.items[0] : null;
       setSelectedDetail(item ?? null);
+      setRecoverableBlockMessage(null);
       toast.success(dryRun ? "Dry run individual listo" : "Borrado individual ejecutado");
     },
-    onError: (error) => {
-      const detail = error instanceof HttpError ? error.detail : error instanceof Error ? error.message : "Error inesperado";
-      toast.error("No se pudo borrar el job", { description: detail });
-    },
+    onError: (error) => handleHttpError(error, "No se pudo borrar el job"),
   });
 
   const items = auditResult?.items ?? [];
   const orphanDirs = auditResult?.orphan_output_dirs ?? [];
+  const skippedRecoverable = auditResult?.skipped_recoverable_jobs ?? [];
   const summary = auditResult?.summary ?? {};
 
+  const selectClass =
+    "h-9 w-full rounded-md border border-white/10 bg-slate-900/80 px-2.5 text-xs text-slate-200 focus:outline-none focus:ring-1 focus:ring-amber-400/50";
+
   return (
-    <div className="space-y-6">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="space-y-2">
-          <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Administracion tecnica</p>
-          <div>
-            <h1 className="font-heading text-2xl text-white">{accountName} - Mantenimiento de jobs</h1>
-            <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-300">
-              Audita consistencia entre base de datos, archivos locales y blobs de origen. El flujo esta preparado para
-              revisar primero y borrar despues, con confirmacion explicita.
-            </p>
-          </div>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          <Link href={`/accounts/${encodeURIComponent(accountName)}/jobs`}>
-            <Button variant="outline">Volver al historial</Button>
-          </Link>
-          <Button variant="outline" onClick={() => auditMutation.mutate()} disabled={auditMutation.isPending}>
-            {auditMutation.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCcw className="mr-2 h-4 w-4" />}
-            Auditar ahora
-          </Button>
-        </div>
-      </div>
-
-      <Card className="border-amber-300/20 bg-gradient-to-br from-amber-500/10 via-slate-950 to-slate-950">
-        <CardContent className="flex flex-col gap-3 p-5 lg:flex-row lg:items-center lg:justify-between">
-          <div className="space-y-1">
-            <p className="text-sm font-medium text-amber-100">Flujo seguro recomendado</p>
-            <p className="text-sm leading-6 text-slate-300">
-              1. Ejecuta auditoria o dry run. 2. Revisa jobs rotos y carpetas huerfanas. 3. Confirma solo cuando estes
-              conforme con el alcance.
-            </p>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <Badge variant="outline">Dry run primero</Badge>
-            <Badge variant="outline">DELETE_JOBS para batch</Badge>
-            <Badge variant="outline">DELETE_JOB para individual</Badge>
-          </div>
-        </CardContent>
-      </Card>
-
-      <Card className="border-white/10 bg-white/5 backdrop-blur">
-        <CardHeader>
-          <CardTitle>Filtro de auditoria</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="grid gap-3 md:grid-cols-4">
-            <div className="space-y-2">
-              <Label htmlFor="maintenance-account">account_name</Label>
-              <Input id="maintenance-account" value={accountName} onChange={(e) => setAccountName(e.target.value)} />
+    <div className="space-y-4 pb-10">
+      <section className="overflow-hidden rounded-2xl border border-amber-300/20 bg-gradient-to-br from-slate-950 via-[#0b1220] to-amber-950/35 shadow-xl shadow-amber-950/20">
+        <div className="border-b border-white/5 px-4 py-4 sm:px-5">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <div className="flex items-center gap-2">
+                <Wrench className="h-5 w-5 text-amber-300" />
+                <h1 className="font-heading text-xl font-semibold tracking-tight text-white sm:text-2xl">Mantenimiento de jobs</h1>
+              </div>
+              <p className="mt-1.5 max-w-2xl text-sm text-slate-300">
+                Audita consistencia entre BD, archivos locales y blobs. Revisa primero, confirma despues.
+              </p>
             </div>
-            <div className="space-y-2">
-              <Label htmlFor="maintenance-module">job_module</Label>
-              <select
-                id="maintenance-module"
-                value={jobModule}
-                onChange={(e) => setJobModule(e.target.value)}
-                className="h-10 w-full rounded-md border border-white/10 bg-slate-900 px-3 text-sm"
-              >
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge className="border-amber-300/30 bg-amber-500/10 text-amber-100">{accountName}</Badge>
+              <Link href={`/accounts/${encodeURIComponent(accountName)}/jobs`}>
+                <Button size="sm" variant="outline" className="h-8">
+                  Historial
+                </Button>
+              </Link>
+              <Button size="sm" variant="outline" className="h-8" onClick={() => auditMutation.mutate()} disabled={auditMutation.isPending}>
+                {auditMutation.isPending ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <RefreshCcw className="mr-1.5 h-3.5 w-3.5" />}
+                Auditar
+              </Button>
+            </div>
+          </div>
+        </div>
+        <div className="flex flex-wrap gap-1.5 px-4 pb-4 sm:px-5">
+          <Badge variant="outline" className="text-[10px]">Dry run primero</Badge>
+          <Badge variant="outline" className="text-[10px]">DELETE_JOBS batch</Badge>
+          <Badge variant="outline" className="text-[10px]">DELETE_JOB individual</Badge>
+        </div>
+      </section>
+
+      <Card className="border-white/10 bg-white/5">
+        <CardHeader className="gap-1 px-4 py-3 sm:px-5">
+          <CardTitle className="text-base">Parametros de auditoria</CardTitle>
+          <CardDescription className="text-xs">Filtros principales y opciones avanzadas colapsables.</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3 px-4 pb-4 sm:px-5">
+          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="space-y-1">
+              <Label htmlFor="maintenance-account" className="text-xs">Cuenta</Label>
+              <Input id="maintenance-account" className="h-9 text-sm" value={accountName} onChange={(e) => setAccountName(e.target.value)} />
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="maintenance-module" className="text-xs">Modulo</Label>
+              <select id="maintenance-module" value={jobModule} onChange={(e) => setJobModule(e.target.value)} className={selectClass}>
                 <option value="all">Todos</option>
                 <option value="promotions">promotions</option>
                 <option value="shelf_recognition">shelf_recognition</option>
               </select>
             </div>
-            <div className="space-y-2">
-              <Label htmlFor="maintenance-status">status</Label>
-              <select
-                id="maintenance-status"
-                value={status}
-                onChange={(e) => setStatus(e.target.value)}
-                className="h-10 w-full rounded-md border border-white/10 bg-slate-900 px-3 text-sm"
-              >
+            <div className="space-y-1">
+              <Label htmlFor="maintenance-status" className="text-xs">Estado</Label>
+              <select id="maintenance-status" value={status} onChange={(e) => setStatus(e.target.value)} className={selectClass}>
                 <option value="all">Todos</option>
                 <option value="queued">queued</option>
                 <option value="running">running</option>
@@ -292,285 +399,348 @@ export function AccountJobsMaintenancePage({ account }: Props) {
                 <option value="failed">failed</option>
               </select>
             </div>
-            <div className="space-y-2">
-              <Label htmlFor="maintenance-limit">limit</Label>
-              <Input id="maintenance-limit" value={limit} onChange={(e) => setLimit(e.target.value)} />
+            <div className="space-y-1">
+              <Label htmlFor="maintenance-limit" className="text-xs">Limite</Label>
+              <Input id="maintenance-limit" className="h-9 text-sm" value={limit} onChange={(e) => setLimit(e.target.value)} />
             </div>
           </div>
 
-          <div className="space-y-2">
-            <Label htmlFor="maintenance-jobids">job_ids opcionales</Label>
-            <Textarea
-              id="maintenance-jobids"
-              value={jobIdsText}
-              onChange={(e) => setJobIdsText(e.target.value)}
-              className="min-h-28"
-              placeholder={"2026-06-03_15-03-41\n2026-06-03_15-18-02"}
-            />
-            <p className="text-xs text-slate-400">Puedes pegar uno por linea o separados por coma si quieres revisar un grupo puntual.</p>
-          </div>
-
-          <div className="grid gap-3 lg:grid-cols-2 xl:grid-cols-3">
-            <SectionSwitch
-              id="maintenance-include-ok"
-              label="Incluir jobs sanos"
-              help="Muestra tambien jobs consistentes para comparar y no solo los rotos."
-              checked={includeOk}
-              onCheckedChange={setIncludeOk}
-            />
-            <SectionSwitch
-              id="maintenance-include-files"
-              label="Revisar archivos fisicos"
-              help="Cruza resultados de base de datos con paths generados y archivos presentes."
-              checked={includeFiles}
-              onCheckedChange={setIncludeFiles}
-            />
-            <SectionSwitch
-              id="maintenance-delete-db"
-              label="Borrar filas de base de datos"
-              help="Incluye registros del job y entidades relacionadas en operaciones de limpieza."
-              checked={deleteDbRows}
-              onCheckedChange={setDeleteDbRows}
-            />
-            <SectionSwitch
-              id="maintenance-delete-local"
-              label="Borrar archivos locales"
-              help="Incluye artefactos locales del job y directorios asociados."
-              checked={deleteLocalFiles}
-              onCheckedChange={setDeleteLocalFiles}
-            />
-            <SectionSwitch
-              id="maintenance-delete-azure"
-              label="Borrar originals en Azure"
-              help="Solo afecta blobs de original_image_cloud cuando el backend los reporta para ese job."
-              checked={deleteAzureOriginals}
-              onCheckedChange={setDeleteAzureOriginals}
-            />
-            <SectionSwitch
-              id="maintenance-running"
-              label="Permitir running o queued"
-              help="Usa esto solo cuando sepas que el job ya no debe seguir vivo."
-              checked={includeRunningJobs}
-              onCheckedChange={setIncludeRunningJobs}
-            />
-          </div>
+          <details className="rounded-lg border border-white/10 bg-black/20 p-3">
+            <summary className="cursor-pointer text-sm font-medium text-slate-200">Opciones avanzadas</summary>
+            <div className="mt-3 space-y-3">
+              <div className="space-y-1">
+                <Label htmlFor="maintenance-jobids" className="text-xs">job_ids opcionales</Label>
+                <Textarea
+                  id="maintenance-jobids"
+                  value={jobIdsText}
+                  onChange={(e) => setJobIdsText(e.target.value)}
+                  className="min-h-20 text-sm"
+                  placeholder={"2026-06-03_15-03-41\n2026-06-03_15-18-02"}
+                />
+              </div>
+              <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+                <SectionSwitch id="maintenance-include-ok" label="Incluir jobs sanos" help="Muestra tambien jobs consistentes." checked={includeOk} onCheckedChange={setIncludeOk} />
+                <SectionSwitch id="maintenance-include-files" label="Revisar archivos fisicos" help="Cruza BD con paths y archivos." checked={includeFiles} onCheckedChange={setIncludeFiles} />
+                <SectionSwitch id="maintenance-delete-db" label="Borrar filas BD" help="Registros del job y relacionados." checked={deleteDbRows} onCheckedChange={setDeleteDbRows} />
+                <SectionSwitch id="maintenance-delete-local" label="Borrar archivos locales" help="Artefactos y directorios del job." checked={deleteLocalFiles} onCheckedChange={setDeleteLocalFiles} />
+                <SectionSwitch id="maintenance-delete-azure" label="Borrar originals Azure" help="Blobs original_image_cloud." checked={deleteAzureOriginals} onCheckedChange={setDeleteAzureOriginals} />
+                <SectionSwitch id="maintenance-running" label="Permitir running/queued" help="Solo si el job ya no debe seguir vivo." checked={includeRunningJobs} onCheckedChange={setIncludeRunningJobs} />
+              </div>
+            </div>
+          </details>
         </CardContent>
       </Card>
 
-      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-        <Card className="border-white/10 bg-white/5 backdrop-blur">
-          <CardContent className="p-4">
-            <p className="text-xs uppercase tracking-wide text-slate-400">Jobs auditados</p>
-            <p className="mt-2 text-2xl font-semibold text-white">{numberValue(summary.jobs_scanned)}</p>
-          </CardContent>
-        </Card>
-        <Card className="border-white/10 bg-white/5 backdrop-blur">
-          <CardContent className="p-4">
-            <p className="text-xs uppercase tracking-wide text-slate-400">Jobs retornados</p>
-            <p className="mt-2 text-2xl font-semibold text-white">{numberValue(summary.jobs_returned)}</p>
-          </CardContent>
-        </Card>
-        <Card className="border-white/10 bg-white/5 backdrop-blur">
-          <CardContent className="p-4">
-            <p className="text-xs uppercase tracking-wide text-slate-400">Jobs rotos</p>
-            <p className="mt-2 text-2xl font-semibold text-white">{numberValue(summary.broken_jobs)}</p>
-          </CardContent>
-        </Card>
-        <Card className="border-white/10 bg-white/5 backdrop-blur">
-          <CardContent className="p-4">
-            <p className="text-xs uppercase tracking-wide text-slate-400">Directorios huerfanos</p>
-            <p className="mt-2 text-2xl font-semibold text-white">{numberValue(summary.orphan_output_dirs)}</p>
-          </CardContent>
-        </Card>
+      {/* KPI cards */}
+      <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
+        <KpiCard label="Jobs auditados" value={numberValue(summary.jobs_scanned)} />
+        <KpiCard label="Jobs retornados" value={numberValue(summary.jobs_returned)} />
+        <KpiCard label="Recuperables" value={numberValue(summary.recoverable_jobs)} variant="amber" />
+        <KpiCard label="Rotos" value={numberValue(summary.broken_jobs)} variant="destructive" />
+        <KpiCard label="Dirs huerfanos" value={numberValue(summary.orphan_output_dirs)} />
       </div>
 
-      <div className="grid gap-4 xl:grid-cols-[1.35fr_0.95fr]">
-        <Card className="border-white/10 bg-white/5 backdrop-blur">
-          <CardHeader>
-            <CardTitle>Resultado de auditoria</CardTitle>
+      {/* Recoverable block message banner */}
+      {recoverableBlockMessage && (
+        <div className="flex items-start gap-3 rounded-xl border border-amber-400/30 bg-amber-500/10 px-4 py-3">
+          <Shield className="mt-0.5 h-5 w-5 shrink-0 text-amber-300" />
+          <div className="min-w-0">
+            <p className="text-sm font-medium text-amber-100">Borrado bloqueado por seguridad</p>
+            <p className="mt-0.5 text-xs leading-5 text-amber-200/80">{recoverableBlockMessage}</p>
+            <p className="mt-1 text-[11px] text-slate-400">
+              Este job fue clasificado como recuperable por el backend porque aun existen artifacts validos. Revisa el detalle antes de forzar un borrado.
+            </p>
+          </div>
+          <Button size="sm" variant="ghost" className="ml-auto h-7 shrink-0 text-xs text-amber-200" onClick={() => setRecoverableBlockMessage(null)}>
+            Cerrar
+          </Button>
+        </div>
+      )}
+
+      <div className="grid gap-4 xl:grid-cols-[1.4fr_0.9fr]">
+        <Card className="border-white/10 bg-white/5">
+          <CardHeader className="gap-1 px-4 py-3 sm:px-5">
+            <CardTitle className="text-base">Resultado de auditoria</CardTitle>
+            <CardDescription className="text-xs">{items.length} jobs en el resultado actual</CardDescription>
           </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="overflow-x-auto rounded-xl border border-white/10">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>job_id</TableHead>
-                    <TableHead>Modulo</TableHead>
-                    <TableHead>Status</TableHead>
-                    <TableHead>Salud</TableHead>
-                    <TableHead>Archivos</TableHead>
-                    <TableHead>Incidencias</TableHead>
-                    <TableHead>Acciones</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {items.map((item) => (
-                    <TableRow key={`maint-${item.job_id}`}>
-                      <TableCell className="font-mono text-xs">{item.job_id}</TableCell>
-                      <TableCell>{item.job_module ?? "-"}</TableCell>
-                      <TableCell>{item.status ?? "-"}</TableCell>
-                      <TableCell>{healthBadge(item.health)}</TableCell>
-                      <TableCell className="text-xs text-slate-300">{filesSummary(item)}</TableCell>
-                      <TableCell className="max-w-80">{issueBadges(item)}</TableCell>
-                      <TableCell>
-                        <div className="flex flex-wrap gap-2">
-                          <Button size="sm" variant="outline" onClick={() => detailMutation.mutate(item.job_id)} disabled={detailMutation.isPending}>
-                            Diagnostico
-                          </Button>
+          <CardContent className="space-y-3 px-0 pb-0 sm:px-0">
+            <div className="max-h-[min(55vh,520px)] overflow-y-auto overscroll-contain">
+              <div className="divide-y divide-white/5">
+                {items.map((item) => {
+                  const isRecoverable = item.health === "recoverable";
+                  return (
+                    <div key={`maint-${item.job_id}`} className={`flex flex-col gap-2 px-3 py-2.5 hover:bg-white/[0.03] sm:flex-row sm:items-start sm:gap-3 sm:px-4 ${isRecoverable ? "border-l-2 border-l-amber-400/40" : ""}`}>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <p className="max-w-[200px] truncate font-mono text-xs text-white sm:max-w-[260px]">{item.job_id}</p>
+                          {healthBadge(item.health)}
+                          <Badge variant="outline" className="h-5 text-[10px]">{item.job_module ?? "-"}</Badge>
+                          <Badge variant="outline" className="h-5 text-[10px]">{item.status ?? "-"}</Badge>
+                          {item.result?.inferred_from_output_dir && (
+                            <Badge className="h-5 border-sky-400/30 bg-sky-500/10 text-[10px] text-sky-200">Inferido desde output</Badge>
+                          )}
+                        </div>
+                        <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1">
+                          <span className="text-[11px] text-slate-500">{filesSummary(item)}</span>
+                          <div className="min-w-0 flex-1">{issueBadges(item)}</div>
+                        </div>
+                        {isRecoverable && recoverableReasonsList(item)}
+                        {isRecoverable && item.result?.output_dir && (
+                          <p className="mt-1 truncate font-mono text-[10px] text-slate-500" title={item.result.output_dir}>
+                            output: {item.result.output_dir}
+                          </p>
+                        )}
+                      </div>
+                      <div className="flex shrink-0 gap-1">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-7 px-2 text-xs"
+                          onClick={() => detailMutation.mutate(item.job_id)}
+                          disabled={detailMutation.isPending}
+                        >
+                          Diagnostico
+                        </Button>
+                        {!isRecoverable && (
                           <Button
                             size="sm"
                             variant="outline"
+                            className="h-7 px-2 text-xs"
                             onClick={() => {
                               setSelectedJobForDelete(item.job_id);
                               deleteJobMutation.mutate(true);
                             }}
                             disabled={deleteJobMutation.isPending}
                           >
-                            Dry run delete
+                            Dry run
                           </Button>
-                        </div>
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                  {!items.length ? (
-                    <TableRow>
-                      <TableCell colSpan={7} className="py-10 text-center text-sm text-slate-400">
-                        Ejecuta una auditoria para ver jobs rotos, archivos faltantes o directorios huerfanos.
-                      </TableCell>
-                    </TableRow>
-                  ) : null}
-                </TableBody>
-              </Table>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+                {!items.length ? (
+                  <div className="px-4 py-10 text-center text-sm text-slate-400">
+                    Ejecuta una auditoria para ver el estado de jobs, archivos y directorios.
+                  </div>
+                ) : null}
+              </div>
             </div>
 
-            <div className="rounded-xl border border-white/10 bg-black/20 p-4">
-              <div className="mb-3 flex items-center gap-2">
-                <AlertTriangle className="h-4 w-4 text-rose-300" />
-                <p className="text-sm font-medium text-white">Directorios huerfanos detectados</p>
+            {/* Skipped recoverable jobs section */}
+            {skippedRecoverable.length > 0 && (
+              <div className="mx-4 mb-3 rounded-lg border border-amber-300/20 bg-amber-500/5 p-3 sm:mx-5">
+                <div className="mb-2 flex items-center gap-2">
+                  <Shield className="h-3.5 w-3.5 text-amber-300" />
+                  <p className="text-sm font-medium text-amber-100">Jobs recuperables omitidos</p>
+                  <Badge className="h-5 border-amber-400/30 bg-amber-500/10 text-[10px] text-amber-200">{skippedRecoverable.length}</Badge>
+                </div>
+                <p className="mb-2 text-[11px] leading-4 text-amber-200/70">
+                  Estos jobs fueron omitidos del cleanup porque backend detecto artifacts validos en output. No se recomienda borrarlos.
+                </p>
+                <div className="max-h-40 space-y-1.5 overflow-y-auto">
+                  {skippedRecoverable.map((item) => (
+                    <div key={`skip-${item.job_id}`} className="flex items-center gap-2 rounded-md border border-amber-300/10 bg-black/20 px-2.5 py-1.5">
+                      <p className="min-w-0 flex-1 truncate font-mono text-[11px] text-amber-100">{item.job_id}</p>
+                      {healthBadge(item.health)}
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="h-6 px-1.5 text-[10px] text-amber-200"
+                        onClick={() => detailMutation.mutate(item.job_id)}
+                        disabled={detailMutation.isPending}
+                      >
+                        Ver detalle
+                      </Button>
+                    </div>
+                  ))}
+                </div>
               </div>
+            )}
+
+            {/* Skipped recoverable count from summary */}
+            {numberValue(summary.jobs_skipped_recoverable) > 0 && skippedRecoverable.length === 0 && (
+              <div className="mx-4 mb-3 flex items-start gap-2 rounded-lg border border-amber-300/20 bg-amber-500/5 px-3 py-2.5 sm:mx-5">
+                <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-300" />
+                <p className="text-[11px] leading-4 text-amber-200/80">
+                  {numberValue(summary.jobs_skipped_recoverable)} job(s) recuperable(s) fueron omitidos del cleanup.
+                  Data recuperable detectada — artifacts validos encontrados en output.
+                </p>
+              </div>
+            )}
+
+            {/* Orphan dirs */}
+            <div className="mx-4 mb-4 rounded-lg border border-white/10 bg-black/20 p-3 sm:mx-5">
+              <div className="mb-2 flex items-center gap-2">
+                <AlertTriangle className="h-3.5 w-3.5 text-rose-300" />
+                <p className="text-sm font-medium text-white">Directorios huerfanos</p>
+                <Badge variant="outline" className="h-5 text-[10px]">{orphanDirs.length}</Badge>
+              </div>
+              <p className="mb-2 text-[11px] leading-4 text-slate-500">
+                Solo se muestran directorios que backend clasifico como huerfanos. La clasificacion depende exclusivamente del backend.
+              </p>
               {orphanDirs.length ? (
-                <div className="space-y-2 text-xs text-slate-200">
+                <div className="max-h-40 space-y-1.5 overflow-y-auto">
                   {orphanDirs.map((orphan, idx) => (
-                    <div key={`orphan-${idx}`} className="rounded-lg border border-white/10 bg-slate-950/60 p-3">
-                      <p className="font-mono text-slate-100">{orphan.path ?? orphan.name ?? "-"}</p>
-                      <p className="mt-2 text-slate-400">
-                        tipo: {orphan.orphan_type ?? "-"} | archivos: {orphan.files_count ?? "-"} | tamano: {formatBytes(orphan.size_bytes)}
+                    <div key={`orphan-${idx}`} className="rounded-md border border-white/10 bg-slate-950/60 px-2.5 py-2 text-[11px]">
+                      <p className="truncate font-mono text-slate-100">{orphan.path ?? orphan.name ?? "-"}</p>
+                      <p className="mt-0.5 text-slate-500">
+                        {orphan.orphan_type ?? "-"} · {orphan.files_count ?? "-"} arch · {formatBytes(orphan.size_bytes)}
                       </p>
                     </div>
                   ))}
                 </div>
               ) : (
-                <p className="text-sm text-slate-400">Todavia no hay directorios huerfanos en el resultado actual.</p>
+                <p className="text-xs text-slate-500">Sin directorios huerfanos en el resultado actual.</p>
               )}
             </div>
           </CardContent>
         </Card>
 
-        <div className="space-y-4">
-          <Card className="border-white/10 bg-white/5 backdrop-blur">
-            <CardHeader>
-              <CardTitle>Limpieza batch</CardTitle>
+        <div className="space-y-3">
+          <Card className="border-white/10 bg-white/5">
+            <CardHeader className="gap-1 px-4 py-3 sm:px-5">
+              <CardTitle className="flex items-center gap-2 text-base">
+                <ShieldAlert className="h-4 w-4 text-amber-300" />
+                Limpieza batch
+              </CardTitle>
             </CardHeader>
-            <CardContent className="space-y-3">
-              <p className="text-sm leading-6 text-slate-300">
-                Usa el dry run para validar el alcance. La limpieza real exige escribir exactamente <code>DELETE_JOBS</code>.
+            <CardContent className="space-y-2.5 px-4 pb-4 sm:px-5">
+              <p className="text-xs leading-5 text-slate-400">
+                Dry run valida alcance. Limpieza real exige escribir <code className="text-amber-200">DELETE_JOBS</code>.
+                Jobs recuperables seran omitidos automaticamente.
               </p>
-              <div className="flex flex-wrap gap-2">
-                <Button variant="outline" onClick={() => cleanupMutation.mutate(true)} disabled={cleanupMutation.isPending}>
-                  {cleanupMutation.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <ShieldAlert className="mr-2 h-4 w-4" />}
-                  Dry run cleanup
+              <div className="flex flex-wrap gap-1.5">
+                <Button size="sm" variant="outline" className="h-8" onClick={() => cleanupMutation.mutate(true)} disabled={cleanupMutation.isPending}>
+                  {cleanupMutation.isPending ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <ShieldAlert className="mr-1.5 h-3.5 w-3.5" />}
+                  Dry run
                 </Button>
                 <Button
+                  size="sm"
                   variant="destructive"
+                  className="h-8"
                   onClick={() => cleanupMutation.mutate(false)}
                   disabled={cleanupMutation.isPending || cleanupConfirmText !== "DELETE_JOBS"}
                 >
-                  <Trash2 className="mr-2 h-4 w-4" />
-                  Ejecutar cleanup real
+                  <Trash2 className="mr-1.5 h-3.5 w-3.5" />
+                  Cleanup real
                 </Button>
               </div>
-              <div className="space-y-2">
-                <Label htmlFor="cleanup-confirm">Confirmacion exacta para cleanup real</Label>
-                <Input
-                  id="cleanup-confirm"
-                  value={cleanupConfirmText}
-                  onChange={(e) => setCleanupConfirmText(e.target.value)}
-                  placeholder="DELETE_JOBS"
-                />
+              <div className="space-y-1">
+                <Label htmlFor="cleanup-confirm" className="text-xs">Confirmacion cleanup</Label>
+                <Input id="cleanup-confirm" className="h-9 text-sm" value={cleanupConfirmText} onChange={(e) => setCleanupConfirmText(e.target.value)} placeholder="DELETE_JOBS" />
               </div>
             </CardContent>
           </Card>
 
-          <Card className="border-white/10 bg-white/5 backdrop-blur">
-            <CardHeader>
-              <CardTitle>Borrado individual</CardTitle>
+          <Card className="border-white/10 bg-white/5">
+            <CardHeader className="gap-1 px-4 py-3 sm:px-5">
+              <CardTitle className="text-base">Borrado individual</CardTitle>
             </CardHeader>
-            <CardContent className="space-y-3">
-              <p className="text-sm leading-6 text-slate-300">
-                Selecciona un job concreto para revisar y luego eliminar. El borrado real exige escribir exactamente <code>DELETE_JOB</code>.
+            <CardContent className="space-y-2.5 px-4 pb-4 sm:px-5">
+              <p className="text-xs leading-5 text-slate-400">
+                Borrado real exige escribir <code className="text-amber-200">DELETE_JOB</code>.
+                {selectedDetail?.health === "recoverable" && (
+                  <span className="mt-1 block text-amber-200/80">
+                    Este job fue marcado como recuperable. El borrado sera bloqueado por backend salvo que se fuerce.
+                  </span>
+                )}
               </p>
-              <div className="space-y-2">
-                <Label htmlFor="delete-job-id">job_id</Label>
+              <div className="space-y-1">
+                <Label htmlFor="delete-job-id" className="text-xs">job_id</Label>
                 <Input
                   id="delete-job-id"
+                  className="h-9 font-mono text-sm"
                   value={selectedJobForDelete}
                   onChange={(e) => setSelectedJobForDelete(e.target.value)}
                   placeholder="2026-06-03_15-03-41"
                 />
               </div>
-              <div className="flex flex-wrap gap-2">
-                <Button variant="outline" onClick={() => deleteJobMutation.mutate(true)} disabled={deleteJobMutation.isPending}>
-                  Dry run delete
+              <div className="flex flex-wrap gap-1.5">
+                <Button size="sm" variant="outline" className="h-8" onClick={() => deleteJobMutation.mutate(true)} disabled={deleteJobMutation.isPending}>
+                  Dry run
                 </Button>
                 <Button
+                  size="sm"
                   variant="destructive"
+                  className="h-8"
                   onClick={() => deleteJobMutation.mutate(false)}
                   disabled={deleteJobMutation.isPending || deleteConfirmText !== "DELETE_JOB"}
                 >
                   Delete real
                 </Button>
               </div>
-              <div className="space-y-2">
-                <Label htmlFor="delete-confirm">Confirmacion exacta para delete real</Label>
-                <Input
-                  id="delete-confirm"
-                  value={deleteConfirmText}
-                  onChange={(e) => setDeleteConfirmText(e.target.value)}
-                  placeholder="DELETE_JOB"
-                />
+              <div className="space-y-1">
+                <Label htmlFor="delete-confirm" className="text-xs">Confirmacion delete</Label>
+                <Input id="delete-confirm" className="h-9 text-sm" value={deleteConfirmText} onChange={(e) => setDeleteConfirmText(e.target.value)} placeholder="DELETE_JOB" />
               </div>
             </CardContent>
           </Card>
 
-          <Card className="border-white/10 bg-white/5 backdrop-blur">
-            <CardHeader>
-              <CardTitle>Detalle del job</CardTitle>
+          <Card className="border-white/10 bg-white/5">
+            <CardHeader className="gap-1 px-4 py-3 sm:px-5">
+              <CardTitle className="text-base">Detalle del job</CardTitle>
             </CardHeader>
-            <CardContent className="space-y-3">
+            <CardContent className="space-y-2.5 px-4 pb-4 sm:px-5">
               {selectedDetail ? (
                 <>
-                  <div className="flex flex-wrap items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-1.5">
                     {healthBadge(selectedDetail.health)}
-                    <Badge variant="outline">{selectedDetail.job_module ?? "-"}</Badge>
-                    <Badge variant="outline">{selectedDetail.status ?? "-"}</Badge>
+                    <Badge variant="outline" className="h-5 text-[10px]">{selectedDetail.job_module ?? "-"}</Badge>
+                    <Badge variant="outline" className="h-5 text-[10px]">{selectedDetail.status ?? "-"}</Badge>
+                    {selectedDetail.result?.inferred_from_output_dir && (
+                      <Badge className="h-5 border-sky-400/30 bg-sky-500/10 text-[10px] text-sky-200">Inferido desde output</Badge>
+                    )}
                   </div>
-                  <div className="rounded-xl border border-white/10 bg-black/20 p-3 text-xs text-slate-200">
-                    <p className="font-mono">{selectedDetail.job_id}</p>
-                    <div className="mt-3">{issueBadges(selectedDetail)}</div>
+                  <div className="rounded-lg border border-white/10 bg-black/20 p-2.5 text-xs">
+                    <p className="font-mono text-[11px] text-slate-100">{selectedDetail.job_id}</p>
+                    <div className="mt-2">{issueBadges(selectedDetail)}</div>
                   </div>
+
+                  {/* Recoverable reasons */}
+                  {selectedDetail.health === "recoverable" && (
+                    <div className="rounded-lg border border-amber-300/20 bg-amber-500/5 p-2.5 text-xs">
+                      <div className="mb-1 flex items-center gap-1.5">
+                        <Shield className="h-3.5 w-3.5 text-amber-300" />
+                        <p className="font-medium text-amber-100">Data recuperable detectada</p>
+                      </div>
+                      <p className="text-[11px] leading-4 text-amber-200/70">
+                        Faltan referencias en DB, pero backend detecto artifacts validos en output. No se recomienda borrar este job.
+                      </p>
+                      {recoverableReasonsList(selectedDetail)}
+                    </div>
+                  )}
+
+                  {/* Broken explanation */}
+                  {selectedDetail.health === "broken" && (
+                    <div className="rounded-lg border border-rose-300/20 bg-rose-500/5 p-2.5 text-xs">
+                      <p className="font-medium text-rose-100">Job roto</p>
+                      <p className="mt-0.5 text-[11px] leading-4 text-rose-200/70">
+                        Backend no detecto evidencia suficiente para recuperar artifacts ni referencias validas.
+                      </p>
+                    </div>
+                  )}
+
+                  {/* Result paths */}
+                  {renderResultPaths(selectedDetail.result)}
+
+                  {/* Inferred output signature */}
+                  {renderOutputSignature(selectedDetail.inferred_output_signature)}
+
                   {Array.isArray(selectedDetail.azure_originals) && selectedDetail.azure_originals.length ? (
-                    <div className="rounded-xl border border-amber-300/20 bg-amber-500/5 p-3 text-xs text-amber-100">
-                      Este job reporta {selectedDetail.azure_originals.length} blob(s) de origen en Azure candidatos para limpieza si activas esa opcion.
+                    <div className="rounded-lg border border-amber-300/20 bg-amber-500/5 p-2.5 text-[11px] text-amber-100">
+                      {selectedDetail.azure_originals.length} blob(s) Azure candidatos si activas esa opcion.
                     </div>
                   ) : null}
-                  {renderJsonBlock("counts", selectedDetail.counts ?? {})}
-                  {renderJsonBlock("files", selectedDetail.files ?? {})}
-                  {renderJsonBlock("azure_originals", selectedDetail.azure_originals ?? [])}
+                  <div className="max-h-[min(40vh,320px)] space-y-2 overflow-y-auto">
+                    {renderJsonBlock("counts", selectedDetail.counts ?? {})}
+                    {renderJsonBlock("result", selectedDetail.result ?? {})}
+                    {renderJsonBlock("files", selectedDetail.files ?? {})}
+                    {renderJsonBlock("azure_originals", selectedDetail.azure_originals ?? [])}
+                  </div>
                 </>
               ) : (
-                <p className="text-sm text-slate-400">
-                  Carga un diagnostico para revisar archivos faltantes, rutas generadas y blobs Azure detectados.
-                </p>
+                <p className="text-xs text-slate-500">Carga un diagnostico para revisar archivos, rutas y blobs Azure.</p>
               )}
             </CardContent>
           </Card>

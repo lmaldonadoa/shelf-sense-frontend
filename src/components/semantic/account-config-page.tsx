@@ -1774,6 +1774,77 @@ export function AccountConfigPage({ account }: AccountConfigPageProps) {
                 />
               </div>
             </div>
+            <div className="mt-4 rounded-lg border border-amber-300/20 bg-amber-500/5 p-4">
+              <div className="mb-3">
+                <p className="text-sm font-medium">Guardrails de enriquecimiento</p>
+                <p className="text-xs text-muted-foreground">Flags reversibles que controlan cómo se rellenan marca y tamaño desde el catálogo. Todos default ON.</p>
+              </div>
+              <div className="grid gap-3 md:grid-cols-3">
+                <div className="flex items-center justify-between rounded-lg border border-white/10 bg-black/20 p-3">
+                  <div className="pr-3">
+                    <p className="text-sm font-medium">brand_prepend_token_aware</p>
+                    <p className="text-[11px] text-muted-foreground">Compara por tokens antes de anteponer marca. Evita duplicados como &quot;DOVE MEN+CARE DOVE CUIDADO&quot;.</p>
+                  </div>
+                  <Switch
+                    checked={promotionCatalogMemory.brand_prepend_token_aware !== false}
+                    onCheckedChange={(checked) =>
+                      setWorkingConfig((prev) => ({
+                        ...prev,
+                        text_enrichment: {
+                          ...(prev.text_enrichment ?? {}),
+                          promotion_catalog_memory: {
+                            ...((((prev.text_enrichment ?? {}) as Record<string, unknown>).promotion_catalog_memory as Record<string, unknown>) ?? {}),
+                            brand_prepend_token_aware: checked,
+                          },
+                        },
+                      }))
+                    }
+                  />
+                </div>
+                <div className="flex items-center justify-between rounded-lg border border-white/10 bg-black/20 p-3">
+                  <div className="pr-3">
+                    <p className="text-sm font-medium">skip_brand_if_support_built</p>
+                    <p className="text-[11px] text-muted-foreground">No antepone marca del catálogo si el nombre fue armado por soporte (name_assisted_from_support).</p>
+                  </div>
+                  <Switch
+                    checked={promotionCatalogMemory.skip_brand_prepend_if_support_built !== false}
+                    onCheckedChange={(checked) =>
+                      setWorkingConfig((prev) => ({
+                        ...prev,
+                        text_enrichment: {
+                          ...(prev.text_enrichment ?? {}),
+                          promotion_catalog_memory: {
+                            ...((((prev.text_enrichment ?? {}) as Record<string, unknown>).promotion_catalog_memory as Record<string, unknown>) ?? {}),
+                            skip_brand_prepend_if_support_built: checked,
+                          },
+                        },
+                      }))
+                    }
+                  />
+                </div>
+                <div className="flex items-center justify-between rounded-lg border border-white/10 bg-black/20 p-3">
+                  <div className="pr-3">
+                    <p className="text-sm font-medium">block_tamano_if_ocr_conflict</p>
+                    <p className="text-[11px] text-muted-foreground">No rellena tamaño del catálogo si el OCR primary detectó una medida distinta (ej. 330ML vs 300ML).</p>
+                  </div>
+                  <Switch
+                    checked={promotionCatalogMemory.block_tamano_if_primary_conflicts !== false}
+                    onCheckedChange={(checked) =>
+                      setWorkingConfig((prev) => ({
+                        ...prev,
+                        text_enrichment: {
+                          ...(prev.text_enrichment ?? {}),
+                          promotion_catalog_memory: {
+                            ...((((prev.text_enrichment ?? {}) as Record<string, unknown>).promotion_catalog_memory as Record<string, unknown>) ?? {}),
+                            block_tamano_if_primary_conflicts: checked,
+                          },
+                        },
+                      }))
+                    }
+                  />
+                </div>
+              </div>
+            </div>
             <div className="mt-4 grid gap-4 xl:grid-cols-2">
               <TagsInput
                 label="allow_field_fill"

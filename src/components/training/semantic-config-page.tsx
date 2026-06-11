@@ -392,6 +392,78 @@ export function SemanticConfigPage({ account }: Props) {
               </div>
             </div>
           )}
+
+          {(
+            (textEnrichment?.promotion_catalog_memory as Record<string, unknown>) ??
+            {}
+          ).enabled && (
+            <div className="rounded-lg border border-amber-300/20 bg-amber-500/5 p-4 space-y-3">
+              <div>
+                <p className="text-sm font-semibold text-slate-100">Guardrails de enriquecimiento</p>
+                <p className="text-xs text-slate-400">Flags reversibles que controlan cómo se rellenan marca y tamaño desde el catálogo. Todos default ON.</p>
+              </div>
+
+              <div className="flex items-center justify-between rounded border border-white/10 bg-white/5 p-3">
+                <div className="space-y-1 pr-4">
+                  <Label htmlFor="brand-prepend-token" className="cursor-pointer">
+                    Marca: prepend token-aware
+                  </Label>
+                  <p className="text-[11px] text-slate-400">
+                    Compara por tokens antes de anteponer marca al nombre. Evita duplicados como &quot;DOVE MEN+CARE DOVE CUIDADO&quot;.
+                  </p>
+                </div>
+                <Switch
+                  id="brand-prepend-token"
+                  checked={
+                    ((textEnrichment?.promotion_catalog_memory as Record<string, unknown>) ?? {}).brand_prepend_token_aware as boolean ?? true
+                  }
+                  onCheckedChange={(checked) =>
+                    handleNestedChange("promotion_catalog_memory", "brand_prepend_token_aware", checked)
+                  }
+                />
+              </div>
+
+              <div className="flex items-center justify-between rounded border border-white/10 bg-white/5 p-3">
+                <div className="space-y-1 pr-4">
+                  <Label htmlFor="skip-brand-support" className="cursor-pointer">
+                    Marca: skip si soporte construyo nombre
+                  </Label>
+                  <p className="text-[11px] text-slate-400">
+                    No antepone marca del catálogo si el nombre fue armado por soporte (name_assisted_from_support). Evita conflictos de marca.
+                  </p>
+                </div>
+                <Switch
+                  id="skip-brand-support"
+                  checked={
+                    ((textEnrichment?.promotion_catalog_memory as Record<string, unknown>) ?? {}).skip_brand_prepend_if_support_built as boolean ?? true
+                  }
+                  onCheckedChange={(checked) =>
+                    handleNestedChange("promotion_catalog_memory", "skip_brand_prepend_if_support_built", checked)
+                  }
+                />
+              </div>
+
+              <div className="flex items-center justify-between rounded border border-white/10 bg-white/5 p-3">
+                <div className="space-y-1 pr-4">
+                  <Label htmlFor="block-tamano-conflict" className="cursor-pointer">
+                    Tamaño: bloquear si OCR primary contradice
+                  </Label>
+                  <p className="text-[11px] text-slate-400">
+                    No rellena tamaño del catálogo si el OCR primary detectó una medida distinta (ej. OCR dice 330ML pero SKU dice 300ML).
+                  </p>
+                </div>
+                <Switch
+                  id="block-tamano-conflict"
+                  checked={
+                    ((textEnrichment?.promotion_catalog_memory as Record<string, unknown>) ?? {}).block_tamano_if_primary_conflicts as boolean ?? true
+                  }
+                  onCheckedChange={(checked) =>
+                    handleNestedChange("promotion_catalog_memory", "block_tamano_if_primary_conflicts", checked)
+                  }
+                />
+              </div>
+            </div>
+          )}
         </CardContent>
       </Card>
 

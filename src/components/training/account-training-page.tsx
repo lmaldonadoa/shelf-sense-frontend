@@ -15,6 +15,7 @@ import { EnrichmentTokensEditor } from "@/components/training/enrichment-tokens-
 import { PromotionVariantsEditor } from "@/components/training/promotion-variants-editor";
 import { CategoryMarkersEditor } from "@/components/training/category-markers-editor";
 import { MeasureNoiseChainsEditor } from "@/components/training/measure-noise-chains-editor";
+import { NameNoisePage } from "@/components/training/name-noise-page";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 
@@ -33,12 +34,13 @@ type TrainingTab =
   | "enrichment-tokens"
   | "variants"
   | "markers"
-  | "measure-noise";
+  | "measure-noise"
+  | "name-noise";
 
 export function AccountTrainingPage({ account }: Props) {
   const [tab, setTab] = useState<TrainingTab>("chains");
 
-  const semanticEnrichmentTabs: TrainingTab[] = ["semantic-aliases", "ignored-phrases", "enrichment-tokens", "variants", "markers", "measure-noise"];
+  const semanticEnrichmentTabs: TrainingTab[] = ["semantic-aliases", "ignored-phrases", "name-noise", "enrichment-tokens", "variants", "markers", "measure-noise"];
   const semanticConfigTabs: TrainingTab[] = ["semantic-config", "size-rules", "rag-effectiveness"];
   const curduriaTabs: TrainingTab[] = ["lab", "curaduria"];
 
@@ -87,6 +89,9 @@ export function AccountTrainingPage({ account }: Props) {
               </Button>
               <Button variant={tab === "ignored-phrases" ? "default" : "outline"} size="sm" onClick={() => setTab("ignored-phrases")}>
                 Frases Ignoradas
+              </Button>
+              <Button variant={tab === "name-noise" ? "default" : "outline"} size="sm" onClick={() => setTab("name-noise")}>
+                Ruido de Nombres
               </Button>
               <Button variant={tab === "enrichment-tokens" ? "default" : "outline"} size="sm" onClick={() => setTab("enrichment-tokens")}>
                 Tokens
@@ -138,6 +143,7 @@ export function AccountTrainingPage({ account }: Props) {
       {/* Semantic Enrichment */}
       {tab === "semantic-aliases" && <SemanticAliasesEditor account={account} />}
       {tab === "ignored-phrases" && <IgnoredPhrasesEditor account={account} />}
+      {tab === "name-noise" && <NameNoisePage account={account} />}
       {tab === "enrichment-tokens" && <EnrichmentTokensEditor account={account} />}
       {tab === "variants" && <PromotionVariantsEditor account={account} />}
       {tab === "markers" && <CategoryMarkersEditor account={account} />}

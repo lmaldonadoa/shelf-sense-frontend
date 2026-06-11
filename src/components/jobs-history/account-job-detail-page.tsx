@@ -21,6 +21,7 @@ import { JobVisualSectionNav } from "@/components/jobs-history/job-visual-sectio
 import { JsonDebugBlock } from "@/components/jobs-history/json-debug-block";
 import { OcrCompareImages } from "@/components/jobs-history/ocr-compare-images";
 import { OcrVariantRows, SupportMemorySummaryRows } from "@/components/jobs-history/ocr-variant-rows";
+import { JobNoiseReviewPanel } from "@/components/jobs/job-noise-review-panel";
 
 type AccountJobDetailPageProps = {
   account?: string;
@@ -801,6 +802,10 @@ export function AccountJobDetailPage({ account, jobId }: AccountJobDetailPagePro
           lookupResult={lookupResult}
           reprocessJobId={reprocessJobId}
         />
+      ) : null}
+
+      {activeView === "overview" && resolvedAccount ? (
+        <JobNoiseReviewPanel jobId={jobId} account={resolvedAccount} />
       ) : null}
 
       {activeView === "visual" ? (

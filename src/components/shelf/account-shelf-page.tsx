@@ -18,10 +18,13 @@ import { UploadPanel } from "@/components/jobs/upload-panel";
 import { ShelfCropLightbox } from "@/components/shelf/shelf-crop-lightbox";
 import { ShelfSkuUploadSafeguard } from "@/components/shelf/shelf-sku-upload-safeguard";
 import { Checkbox } from "@/components/ui/checkbox";
+import { MdReportDialog, fetchMarkdownReport } from "@/components/ui/md-report-dialog";
+import { ShelfAuditSummary, ShelfCropAuditDetail, ShelfConfigSnapshot, ShelfEventsTimeline } from "@/components/shelf/shelf-audit-panel";
 
 type Props = { account: string };
 type Tab = "jobs" | "results" | "skus" | "assets" | "index" | "review";
 type SkuWorkspaceTab = "catalogo" | "cargas" | "dataset" | "pruebas";
+type IndexWorkspaceSection = "indices" | "config" | "tecnico";
 type ShelfTrainingBusyState = {
   mode: "single" | "batch";
   skuId: string;
@@ -406,6 +409,195 @@ function diagnosticsEmbeddingTone(diag: ShelfDiagnostics | null): "default" | "s
   return "outline";
 }
 
+type ImageEmbeddingHealthBucket = "ok" | "fallback" | "failed" | "partial" | "missing";
+
+function normalizeSkuCoverageLookupKey(value: unknown): string {
+  return String(value ?? "").trim();
+}
+
+function skuCoverageAliasKeys(sku: ShelfSku): string[] {
+  const row = sku as Record<string, unknown>;
+  const aliases = [
+    getSkuCodeValue(sku),
+    firstNonEmptyString(sku.sku_id, sku.sku_code, sku.id),
+    firstNonEmptyString(row.sku_code_normalized, row.cod_lucky, row.cod_lucky_barcode),
+  ];
+  const keys = new Set<string>();
+  for (const alias of aliases) {
+    const trimmed = normalizeSkuCoverageLookupKey(alias);
+    if (!trimmed) continue;
+    keys.add(trimmed);
+    keys.add(trimmed.toUpperCase());
+    keys.add(trimmed.toLowerCase());
+  }
+  return Array.from(keys);
+}
+
+function datasetSummaryTotalsFromResponse(data?: ShelfDatasetSummaryResponse | null): {
+  total_images: number;
+  indexable_images: number;
+  non_indexable_images: number;
+} {
+  const root = (data ?? {}) as Record<string, unknown>;
+  const summary = (root.summary ?? data?.totals ?? {}) as Record<string, unknown>;
+  const total_images = Number(summary.total_images ?? summary.images ?? 0) || 0;
+  const indexable_images = Number(summary.indexable_images ?? summary.indexable ?? 0) || 0;
+  const non_indexable_images = Number(summary.non_indexable_images ?? Math.max(0, total_images - indexable_images)) || 0;
+  return { total_images, indexable_images, non_indexable_images };
+}
+
+function datasetSummaryBySkuRows(data?: ShelfDatasetSummaryResponse | null): Array<Record<string, unknown>> {
+  if (!data) return [];
+  const root = data as Record<string, unknown>;
+  const candidates = [data.skus, data.by_sku, root.coverage_by_sku, root.items];
+  for (const candidate of candidates) {
+    if (Array.isArray(candidate) && candidate.length) {
+      return candidate.map((row) => ((row && typeof row === "object" ? row : {}) as Record<string, unknown>));
+    }
+  }
+  return [];
+}
+
+function datasetSummaryRowCounts(row: Record<string, unknown>): { images: number; indexable: number } {
+  const images = Number(row.total_images ?? row.count ?? row.images ?? row.image_count ?? row.images_total ?? 0) || 0;
+  const indexable = Number(row.indexable_images ?? row.indexable_count ?? row.indexable ?? images) || 0;
+  return { images, indexable };
+}
+
+function shelfDatasetRoleIsIndexable(role: string, explicit?: unknown): boolean {
+  if (typeof explicit === "boolean") return explicit;
+  if (explicit === 1 || explicit === "1" || explicit === "true") return true;
+  if (explicit === 0 || explicit === "0" || explicit === "false") return false;
+  const normalized = role.trim().toLowerCase();
+  if (["validation", "reserve", "rejected"].includes(normalized)) return false;
+  if (["reference_active", "reference_extra"].includes(normalized)) return true;
+  return true;
+}
+
+type ImageIndexableBucket = "indexable" | "non_indexable";
+
+function imageIndexableMeta(image: Record<string, unknown>): {
+  label: string;
+  tone: "default" | "secondary" | "destructive" | "outline";
+  bucket: ImageIndexableBucket;
+  indexable: boolean;
+} {
+  const role = firstNonEmptyString(image.dataset_role) || "reference_active";
+  const indexable = shelfDatasetRoleIsIndexable(role, image.is_indexable);
+  return indexable
+    ? { label: "Indexable", tone: "default", bucket: "indexable", indexable: true }
+    : { label: "No indexable", tone: "secondary", bucket: "non_indexable", indexable: false };
+}
+
+function imageEmbeddingDiagnosticsSummary(image: Record<string, unknown>): Record<string, unknown> | null {
+  const summary = image.embedding_diagnostics_summary;
+  return summary && typeof summary === "object" ? (summary as Record<string, unknown>) : null;
+}
+
+function imageHasExplicitEmbeddingEvidence(image: Record<string, unknown>): boolean {
+  const embeddingStatus = firstNonEmptyString(image.embedding_status, image.embedding_state);
+  if (embeddingStatus) return true;
+  const diagSummary = imageEmbeddingDiagnosticsSummary(image);
+  if (diagSummary) return true;
+  const embeddingIds = Array.isArray(image.embedding_ids)
+    ? image.embedding_ids.filter((id) => id !== null && id !== undefined && String(id).trim() !== "")
+    : [];
+  const models = Array.isArray(image.embedding_models)
+    ? image.embedding_models.map((item) => String(item).toLowerCase()).filter(Boolean)
+    : [];
+  const diag = normalizeDiagnosticsPayload(image.diagnostics ?? image.embedding_diagnostics);
+  return Boolean(embeddingIds.length || models.length || diag);
+}
+
+function imageEmbeddingModelsList(image: Record<string, unknown>): string[] {
+  const summary = imageEmbeddingDiagnosticsSummary(image);
+  const fromSummary = Array.isArray(summary?.available_models)
+    ? summary.available_models.map((item) => String(item).toLowerCase()).filter(Boolean)
+    : [];
+  if (fromSummary.length) return fromSummary;
+  return Array.isArray(image.embedding_models)
+    ? image.embedding_models.map((item) => String(item).toLowerCase()).filter(Boolean)
+    : [];
+}
+
+/** Mapea embedding_status canónico del backend. Sin evidencia => null (no inferir faltantes). */
+function imageEmbeddingStatusFromBackend(image: Record<string, unknown>): {
+  label: string;
+  tone: "default" | "secondary" | "destructive" | "outline";
+  bucket: ImageEmbeddingHealthBucket;
+} | null {
+  if (!imageHasExplicitEmbeddingEvidence(image)) return null;
+
+  const models = imageEmbeddingModelsList(image);
+  const explicitStatus = firstNonEmptyString(image.embedding_status, image.embedding_state)?.toLowerCase();
+  const diagSummary = imageEmbeddingDiagnosticsSummary(image);
+  const diag = normalizeDiagnosticsPayload(image.diagnostics ?? image.embedding_diagnostics);
+  const fallbackUsed = diagSummary?.fallback_used === true
+    || diag?.models?.fallback_used
+    || diag?.outcome_status === "success_with_fallback";
+
+  if (explicitStatus === "not_indexable") return null;
+
+  if (explicitStatus === "failed" || (diag?.errors ?? []).length || diag?.outcome_status === "failed") {
+    return { label: "Embedding fallido", tone: "destructive", bucket: "failed" };
+  }
+  if (explicitStatus === "fallback" || fallbackUsed) {
+    return { label: "Embedding degradado", tone: "secondary", bucket: "fallback" };
+  }
+  if (explicitStatus === "pending") {
+    return { label: "Pendiente embedding", tone: "secondary", bucket: "missing" };
+  }
+  if (explicitStatus === "unknown") {
+    return { label: "Estado desconocido", tone: "outline", bucket: "missing" };
+  }
+  if (explicitStatus === "complete") {
+    return {
+      label: models.length ? models.join(" + ") : "Embedding completo",
+      tone: "default",
+      bucket: "ok",
+    };
+  }
+  if (explicitStatus === "partial") {
+    const missing = Array.isArray(diagSummary?.missing_models)
+      ? diagSummary.missing_models.map((item) => String(item)).filter(Boolean)
+      : [];
+    return {
+      label: missing.length ? `Parcial · falta ${missing.join(", ")}` : "Embedding parcial",
+      tone: "outline",
+      bucket: "partial",
+    };
+  }
+
+  if (diag?.outcome_status === "failed" || (diag?.errors ?? []).length) {
+    return { label: "Embedding fallido", tone: "destructive", bucket: "failed" };
+  }
+  if (diag?.models?.fallback_used || diag?.outcome_status === "success_with_fallback") {
+    return { label: "Embedding degradado", tone: "secondary", bucket: "fallback" };
+  }
+  if (models.includes("dinov2") && models.includes("siglip")) {
+    return { label: "dinov2 + siglip", tone: "default", bucket: "ok" };
+  }
+  if (models.length) {
+    return { label: models.join(" + "), tone: "outline", bucket: "partial" };
+  }
+  if (diag) {
+    return { label: diagnosticsEmbeddingUiLabel(diag), tone: diagnosticsEmbeddingTone(diag), bucket: "partial" };
+  }
+  return null;
+}
+
+function imageEmbeddingHealthMeta(image: Record<string, unknown>): {
+  label: string;
+  tone: "default" | "secondary" | "destructive" | "outline";
+  bucket: ImageEmbeddingHealthBucket;
+} {
+  return imageEmbeddingStatusFromBackend(image) ?? {
+    label: "Estado no disponible",
+    tone: "outline",
+    bucket: "missing",
+  };
+}
+
 function previewUrlOf(input: Record<string, unknown>): string | null {
   return firstNonEmptyString(
     input.preview_url,
@@ -534,6 +726,299 @@ function resultCropIdValue(row: Record<string, unknown>): string {
 
 function resultTopCandidates(row: Record<string, unknown>): Record<string, unknown>[] {
   return Array.isArray(row.top_candidates) ? (row.top_candidates as Record<string, unknown>[]) : [];
+}
+
+function candidateSkuCode(candidate: Record<string, unknown>): string {
+  return firstNonEmptyString(candidate.sku_id, candidate.sku_code, candidate.cod_lucky) || "";
+}
+
+function skuCodesEqual(a: string, b: string): boolean {
+  const left = a.trim().toLowerCase();
+  const right = b.trim().toLowerCase();
+  return Boolean(left) && left === right;
+}
+
+function skuConfusionKey(anchorSku: string, negativeSku: string): string {
+  return `${anchorSku.trim().toUpperCase()}::${negativeSku.trim().toUpperCase()}`;
+}
+
+function pendingSkuConfusions(
+  candidates: Record<string, unknown>[],
+  anchorSku: string,
+  savedConfusionKeys: Set<string>,
+  maxItems = 5,
+): string[] {
+  const anchor = anchorSku.trim();
+  if (!anchor) return [];
+  return candidates
+    .slice(0, maxItems)
+    .map((candidate, candidateIdx) => candidateSkuCode(candidate) || `candidate_${candidateIdx + 1}`)
+    .filter((code) => Boolean(code.trim()) && !skuCodesEqual(code, anchor))
+    .filter((code) => !savedConfusionKeys.has(skuConfusionKey(anchor, code)));
+}
+
+function candidateScoreBreakdown(candidate: Record<string, unknown>): Record<string, unknown> {
+  const breakdown = candidate.score_breakdown;
+  return breakdown && typeof breakdown === "object" ? (breakdown as Record<string, unknown>) : {};
+}
+
+function getHardNegativePenaltyApplied(candidate: Record<string, unknown>): number {
+  const value = candidateScoreBreakdown(candidate).hard_negative_penalty_applied;
+  return typeof value === "number" ? value : 0;
+}
+
+function getHardNegativeAnchors(candidate: Record<string, unknown>): string[] {
+  const anchors = candidateScoreBreakdown(candidate).hard_negative_triggered_by;
+  return Array.isArray(anchors) ? anchors.map((item) => String(item)).filter(Boolean) : [];
+}
+
+function hardNegativeAppliedToCandidate(candidate: Record<string, unknown>): boolean {
+  return getHardNegativePenaltyApplied(candidate) > 0;
+}
+
+function cropHasHardNegativePenalty(row: Record<string, unknown>): boolean {
+  return resultTopCandidates(row).some((candidate) => hardNegativeAppliedToCandidate(candidate));
+}
+
+function cropHardNegativePenalizedCount(row: Record<string, unknown>): number {
+  return resultTopCandidates(row).filter((candidate) => hardNegativeAppliedToCandidate(candidate)).length;
+}
+
+type ParsedHardNegativeSummary = {
+  total: number;
+  pairs: Array<{ pair: string; anchor: string; negative: string; count: number }>;
+};
+
+function parseHardNegativeSummary(summary: Record<string, unknown> | null | undefined): ParsedHardNegativeSummary {
+  if (!summary) return { total: 0, pairs: [] };
+  const total = Number(summary.total_hard_negative_penalty_applied ?? 0) || 0;
+  const pairsRaw = summary.hard_negative_pairs_triggered;
+  const pairs: ParsedHardNegativeSummary["pairs"] = [];
+  if (pairsRaw && typeof pairsRaw === "object") {
+    for (const [pair, count] of Object.entries(pairsRaw as Record<string, unknown>)) {
+      const [anchor, negative] = pair.split("->");
+      pairs.push({
+        pair,
+        anchor: anchor?.trim() || pair,
+        negative: negative?.trim() || "",
+        count: Number(count) || 0,
+      });
+    }
+  }
+  return { total, pairs };
+}
+
+function hardNegativePairLabel(pair: { anchor: string; negative: string }): string {
+  return `${pair.anchor} → ${pair.negative}`;
+}
+
+function cropHardNegativeTableLabel(row: Record<string, unknown>): { short: string; title: string } {
+  const penalized = resultTopCandidates(row)
+    .map((candidate) => ({
+      code: candidateSkuCode(candidate) || "?",
+      penalty: getHardNegativePenaltyApplied(candidate),
+      anchors: getHardNegativeAnchors(candidate),
+    }))
+    .filter((item) => item.penalty > 0);
+  if (!penalized.length) {
+    return { short: "-", title: "Sin penalización por hard negative en esta corrida" };
+  }
+  const totalPenalty = penalized.reduce((sum, item) => sum + item.penalty, 0);
+  const short = penalized.length === 1
+    ? `−${penalized[0].penalty.toFixed(2)}`
+    : `${penalized.length} · −${totalPenalty.toFixed(2)}`;
+  const title = penalized
+    .map((item) => `${item.code}: −${item.penalty.toFixed(3)}${item.anchors.length ? ` · ancla ${item.anchors.join(", ")}` : ""}`)
+    .join(" | ");
+  return { short, title };
+}
+
+function reviewItemPredictedSkuCode(item: ShelfReviewQueueItem): string {
+  const row = item as Record<string, unknown>;
+  return firstNonEmptyString(
+    item.predicted_sku_code,
+    item.suggested_sku_id,
+    item.predicted_sku_name,
+    item.predicted_sku_id != null ? String(item.predicted_sku_id) : "",
+    row.sku_id,
+  ) || "";
+}
+
+function reviewItemTopCandidates(item: ShelfReviewQueueItem): Record<string, unknown>[] {
+  const row = item as Record<string, unknown>;
+  const fromApi = Array.isArray(item.top_candidates)
+    ? (item.top_candidates as Record<string, unknown>[])
+    : Array.isArray(row.top_candidates)
+      ? (row.top_candidates as Record<string, unknown>[])
+      : [];
+  if (fromApi.length) return fromApi;
+  const predicted = reviewItemPredictedSkuCode(item);
+  if (!predicted) return [];
+  return [{
+    sku_id: predicted,
+    sku_code: predicted,
+    sku_name: item.predicted_sku_name,
+    score: typeof row.confidence === "number" ? row.confidence : row.score,
+  }];
+}
+
+type SimilarCandidatesPanelProps = {
+  candidates: Record<string, unknown>[];
+  anchorSku: string;
+  selectedSku?: string;
+  onSelectCandidate: (code: string) => void;
+  onMarkConfusion: (anchorSku: string, negativeSku: string) => void;
+  onMarkAllRemainingConfusions?: (anchorSku: string, negativeSkus: string[]) => void;
+  isMarking: boolean;
+  isMarkingAll?: boolean;
+  savedConfusionKeys: Set<string>;
+  maxItems?: number;
+};
+
+function SimilarCandidatesPanel({
+  candidates,
+  anchorSku,
+  selectedSku,
+  onSelectCandidate,
+  onMarkConfusion,
+  onMarkAllRemainingConfusions,
+  isMarking,
+  isMarkingAll = false,
+  savedConfusionKeys,
+  maxItems = 5,
+}: SimilarCandidatesPanelProps) {
+  const anchor = anchorSku.trim();
+  const anchorReady = Boolean(anchor);
+  const visibleCandidates = candidates.slice(0, maxItems);
+  const pendingNegatives = pendingSkuConfusions(candidates, anchor, savedConfusionKeys, maxItems);
+
+  if (!candidates.length) {
+    return <p className="text-xs text-slate-500">Sin candidatos similares disponibles.</p>;
+  }
+
+  return (
+    <div className="min-w-0 space-y-2">
+      {!anchorReady ? (
+        <p className="rounded-md border border-amber-300/25 bg-amber-500/10 px-2 py-1.5 text-[11px] leading-relaxed text-amber-100">
+          Confirma primero el SKU correcto para registrar confusiones respecto a ese ancla.
+        </p>
+      ) : (
+        <div className="rounded-md border border-cyan-300/25 bg-cyan-500/10 px-2 py-1.5">
+          <p className="break-all font-mono text-xs text-cyan-50">{anchor}</p>
+          <p className="mt-0.5 text-[11px] leading-relaxed text-cyan-100/80">SKU correcto confirmado para este crop.</p>
+        </div>
+      )}
+
+      {anchorReady && pendingNegatives.length > 0 ? (
+        <div className="rounded-md border border-amber-300/30 bg-amber-500/10 p-2">
+          <p className="text-[11px] leading-relaxed text-amber-50">
+            {pendingNegatives.length === 1
+              ? "Queda 1 candidato parecido sin marcar como confusión."
+              : `Quedan ${pendingNegatives.length} candidatos parecidos sin marcar como confusiones.`}
+          </p>
+          <Button
+            size="sm"
+            variant="outline"
+            className="mt-2 h-8 w-full whitespace-normal border-amber-300/40 text-xs leading-snug text-amber-50 hover:bg-amber-500/20"
+            disabled={isMarking || isMarkingAll}
+            title="No reasigna la imagen. Guarda que estos SKUs se parecen al correcto pero no lo son."
+            onClick={() => onMarkAllRemainingConfusions?.(anchor, pendingNegatives)}
+          >
+            {isMarkingAll
+              ? "Guardando confusiones…"
+              : pendingNegatives.length === 1
+                ? "Marcar restante como confusión"
+                : `Marcar ${pendingNegatives.length} restantes como confusiones`}
+          </Button>
+        </div>
+      ) : null}
+
+      <p
+        className="break-words text-[11px] leading-relaxed text-slate-400"
+        title="Esto no reasigna la imagen. Solo guarda que este SKU suele confundirse con el correcto."
+      >
+        Marca candidatos parecidos pero incorrectos (hard negative). No mueve la foto al SKU equivocado.
+      </p>
+
+      <div className="space-y-2">
+        {visibleCandidates.map((candidate, candidateIdx) => {
+          const code = candidateSkuCode(candidate) || `candidate_${candidateIdx + 1}`;
+          const candidateScore = typeof candidate.score === "number" ? candidate.score : null;
+          const isAnchor = anchorReady && skuCodesEqual(code, anchor);
+          const isSelected = Boolean(selectedSku) && skuCodesEqual(code, selectedSku ?? "");
+          const confusionKey = skuConfusionKey(anchor, code);
+          const alreadySaved = savedConfusionKeys.has(confusionKey);
+          const canMarkConfusion = anchorReady && !isAnchor && Boolean(code.trim());
+          const candidateName = firstNonEmptyString(candidate.sku_name, candidate.nombre, candidate.marca);
+          const hnPenalty = getHardNegativePenaltyApplied(candidate);
+          const hnAnchors = getHardNegativeAnchors(candidate);
+          const hnApplied = hnPenalty > 0;
+
+          return (
+            <div
+              key={`sim-cand-${candidateIdx}-${code}`}
+              className={`rounded-md border p-2.5 ${
+                isSelected || isAnchor
+                  ? "border-cyan-300/40 bg-cyan-500/5"
+                  : hnApplied
+                    ? "border-violet-300/35 bg-violet-500/5"
+                    : "border-white/10 bg-black/20"
+              }`}
+            >
+              <div className="flex items-start gap-2">
+                <div className="min-w-0 flex-1">
+                  <p className="break-all font-mono text-xs leading-snug text-slate-100">{code}</p>
+                  {candidateName ? (
+                    <p className="mt-0.5 break-words text-[11px] leading-snug text-slate-400">{candidateName}</p>
+                  ) : null}
+                </div>
+                <div className="flex shrink-0 flex-col items-end gap-1">
+                  {isAnchor ? <Badge variant="default" className="whitespace-nowrap text-[10px]">Correcto</Badge> : null}
+                  {hnApplied ? (
+                    <Badge variant="secondary" className="whitespace-nowrap text-[10px]" title="Ranking ajustado con confusiones registradas">
+                      −{hnPenalty.toFixed(3)} HN
+                    </Badge>
+                  ) : null}
+                  <Badge variant={confidenceTone(candidateScore)} className="whitespace-nowrap text-[10px]">
+                    {candidateScore !== null ? candidateScore.toFixed(3) : "-"}
+                  </Badge>
+                </div>
+              </div>
+              {hnApplied ? (
+                <p className="mt-2 text-[11px] leading-snug text-violet-100/90">
+                  Ranking ajustado con memoria de confusión
+                  {hnAnchors.length ? ` · ancla: ${hnAnchors.join(", ")}` : ""}
+                </p>
+              ) : null}
+              <div className="mt-2 grid grid-cols-1 gap-1.5">
+                <Button
+                  size="sm"
+                  variant={isSelected || isAnchor ? "default" : "outline"}
+                  className="h-8 w-full justify-center text-xs"
+                  onClick={() => onSelectCandidate(code)}
+                  title={isAnchor ? "Este es el SKU correcto del crop" : "Usar este SKU como el correcto"}
+                >
+                  {isAnchor ? "Es el correcto" : "Elegir como correcto"}
+                </Button>
+                {canMarkConfusion ? (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="h-8 w-full justify-center whitespace-normal text-xs leading-snug text-amber-100 hover:text-amber-50"
+                    disabled={isMarking || isMarkingAll || alreadySaved}
+                    onClick={() => onMarkConfusion(anchor, code)}
+                    title="No reasigna la imagen. Solo guarda que este SKU suele confundirse con el correcto."
+                  >
+                    {alreadySaved ? "Confusión guardada" : "Similar pero incorrecto"}
+                  </Button>
+                ) : null}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
 }
 
 function resultNumeric(row: Record<string, unknown>, key: string): number | null {
@@ -708,6 +1193,13 @@ function shelfRecentJobTypeLabel(row: RecentJob): string {
   return "General";
 }
 
+function shelfJobProgressRatio(job: { processed_images?: number | null; total_images?: number | null }): number {
+  const total = Number(job.total_images ?? 0);
+  const processed = Number(job.processed_images ?? 0);
+  if (!total || total <= 0) return 0;
+  return Math.min(1, Math.max(0, processed / total));
+}
+
 function getShelfJobTraceInfo(input: unknown): ShelfJobTraceInfo {
   const row = input && typeof input === "object" ? (input as Record<string, unknown>) : {};
   return {
@@ -812,9 +1304,36 @@ function extractUiContract(...sources: Array<unknown>): Record<string, unknown> 
   return null;
 }
 
+type MdDialogRequest = {
+  title: string;
+  sourceUrl: string;
+  downloadFilename?: string;
+} | null;
+
+function resolveArtifactPreviewUrl(path?: string | null): string | null {
+  if (!path) return null;
+  const proxyBase = process.env.NEXT_PUBLIC_OCR_PROXY_BASE ?? "/admin/ocr/proxy";
+  const toProxy = (p: string, search = "") => `${proxyBase}${p}${search}`;
+  if (path.startsWith("http://") || path.startsWith("https://")) {
+    try {
+      const parsed = new URL(path);
+      if (parsed.pathname.startsWith("/static/")) return toProxy(parsed.pathname, parsed.search);
+      if (parsed.pathname.startsWith("/v1/")) return toProxy(parsed.pathname, parsed.search);
+    } catch { /* ignore */ }
+    return path;
+  }
+  if (path.startsWith("/v1/")) return toProxy(path);
+  if (path.startsWith("/static/")) return toProxy(path);
+  if (path.startsWith("/")) return path;
+  const staticIdx = path.replaceAll("\\", "/").indexOf("/static/");
+  if (staticIdx >= 0) return toProxy(path.replaceAll("\\", "/").slice(staticIdx));
+  return path;
+}
+
 export function AccountShelfPage({ account }: Props) {
   const [tab, setTab] = useState<Tab>("jobs");
   const [skuWorkspaceTab, setSkuWorkspaceTab] = useState<SkuWorkspaceTab>("catalogo");
+  const [indexWorkspaceSection, setIndexWorkspaceSection] = useState<IndexWorkspaceSection>("indices");
   const [jobPayload, setJobPayload] = useState<CreateShelfJobRequest>({
     account_name: account,
     config_name: "default",
@@ -934,6 +1453,12 @@ export function AccountShelfPage({ account }: Props) {
   const [hardNegativeTargetSkuId, setHardNegativeTargetSkuId] = useState("");
   const [hardNegativeReason, setHardNegativeReason] = useState("similar_packaging");
   const [hardNegativeNote, setHardNegativeNote] = useState("");
+  const [savedSkuConfusionKeys, setSavedSkuConfusionKeys] = useState<Set<string>>(() => new Set());
+  const [datasetCoverageFilter, setDatasetCoverageFilter] = useState<"all" | "with_images" | "without_images" | "indexable">("all");
+  const [datasetImageRoleFilter, setDatasetImageRoleFilter] = useState<string>("all");
+  const [datasetImageIndexableFilter, setDatasetImageIndexableFilter] = useState<"all" | ImageIndexableBucket>("all");
+  const [datasetToolsExpanded, setDatasetToolsExpanded] = useState(false);
+  const [cargasWorkspaceSection, setCargasWorkspaceSection] = useState<"ficha" | "bulk" | "images">("ficha");
   const [thresholdForm, setThresholdForm] = useState({
     high_min: "0.82",
     high_delta: "0.08",
@@ -956,10 +1481,30 @@ export function AccountShelfPage({ account }: Props) {
   const [reliabilityCreatedTo, setReliabilityCreatedTo] = useState("");
   const [reliabilityCompareBaselineJobId, setReliabilityCompareBaselineJobId] = useState("");
   const [reliabilityCompareCandidateJobId, setReliabilityCompareCandidateJobId] = useState("");
+  const [ocrAssistDraft, setOcrAssistDraft] = useState({
+    enabled: false,
+    only_when_ambiguous: true,
+    apply_to_top_k: 3,
+    reorder_top_candidates: true,
+    prefetch_catalog_by_category: true,
+    prefetch_max_rows: 2000,
+    num_predict: 128,
+    num_ctx: 1024,
+    timeout_sec: 12,
+    min_text_chars: 4,
+    score_boost_barcode_exact: 0.20,
+    score_boost_marca: 0.05,
+    score_boost_tamano: 0.05,
+    score_boost_variante: 0.03,
+    score_penalty_on_conflict: 0.05,
+  });
+  const [ocrAssistDirty, setOcrAssistDirty] = useState(false);
+  const [mdDialogRequest, setMdDialogRequest] = useState<MdDialogRequest>(null);
   const [reviewSearch, setReviewSearch] = useState("");
   const [reviewStateFilter, setReviewStateFilter] = useState("all");
   const [reviewSkuSearch, setReviewSkuSearch] = useState("");
   const [reviewDecisionSkuId, setReviewDecisionSkuId] = useState("");
+  const [selectedReviewItemId, setSelectedReviewItemId] = useState("");
   const [testSkuId, setTestSkuId] = useState("");
   const [testImagePath, setTestImagePath] = useState("");
   const [testIdPdv, setTestIdPdv] = useState("PDV_TEST_001");
@@ -975,6 +1520,21 @@ export function AccountShelfPage({ account }: Props) {
   const [lastEvaluateCrop, setLastEvaluateCrop] = useState<ShelfEvaluateCropResponse | null>(null);
 
   const shelfEnabled = String(process.env.NEXT_PUBLIC_ENABLE_SHELF_MODULE ?? "true").toLowerCase() === "true";
+
+  const mdDialogQuery = useQuery({
+    queryKey: ["shelf-md-dialog", mdDialogRequest?.sourceUrl],
+    enabled: Boolean(mdDialogRequest?.sourceUrl),
+    retry: false,
+    queryFn: async () => {
+      if (!mdDialogRequest?.sourceUrl) return "";
+      return fetchMarkdownReport(mdDialogRequest.sourceUrl);
+    },
+  });
+
+  function openMdDialog(title: string, rawUrl: string, downloadFilename?: string) {
+    const sourceUrl = resolveArtifactPreviewUrl(rawUrl) ?? rawUrl;
+    setMdDialogRequest({ title, sourceUrl, downloadFilename });
+  }
 
   function loadShelfJob(jobIdToLoad: string, targetTab: Tab = "results") {
     const nextJobId = jobIdToLoad.trim();
@@ -1173,12 +1733,26 @@ export function AccountShelfPage({ account }: Props) {
     queryKey: ["shelf-dataset-summary", account, datasetSummarySkuId],
     queryFn: () => ocrApi.getShelfDatasetSummary(account, datasetSummarySkuId.trim() || undefined),
     enabled: shelfEnabled && ["index", "skus"].includes(tab),
+    staleTime: 30_000,
+  });
+
+  const accountDatasetCoverageQuery = useQuery({
+    queryKey: ["shelf-dataset-coverage", account],
+    queryFn: () => ocrApi.getShelfDatasetSummary(account),
+    enabled: shelfEnabled && tab === "skus" && ["catalogo", "cargas", "dataset", "pruebas"].includes(skuWorkspaceTab),
+    staleTime: 30_000,
   });
 
   const hardNegativesQuery = useQuery({
     queryKey: ["shelf-hard-negatives", account, hardNegativeSkuId],
     queryFn: () => ocrApi.listShelfHardNegatives(account, hardNegativeSkuId.trim()),
-    enabled: shelfEnabled && tab === "skus" && Boolean(hardNegativeSkuId.trim()),
+    enabled: shelfEnabled && tab === "skus" && skuWorkspaceTab === "dataset" && Boolean(hardNegativeSkuId.trim()),
+  });
+
+  const catalogSkuHardNegativesQuery = useQuery({
+    queryKey: ["shelf-hard-negatives", account, skuCatalogDetailCode],
+    queryFn: () => ocrApi.listShelfHardNegatives(account, skuCatalogDetailCode.trim()),
+    enabled: shelfEnabled && tab === "skus" && skuWorkspaceTab === "catalogo" && Boolean(skuCatalogDetailCode.trim()),
   });
 
   const activeConfigQuery = useQuery({
@@ -1197,7 +1771,8 @@ export function AccountShelfPage({ account }: Props) {
   const versionsQuery = useQuery({
     queryKey: ["shelf-index-versions", account],
     queryFn: () => ocrApi.listShelfVectorIndexVersions(account),
-    enabled: shelfEnabled && tab === "index",
+    enabled: shelfEnabled && (tab === "index" || (tab === "skus" && skuWorkspaceTab === "dataset")),
+    staleTime: 60_000,
   });
 
   const shelfOperationQuery = useQuery({
@@ -1231,7 +1806,8 @@ export function AccountShelfPage({ account }: Props) {
   const skuImagesQuery = useQuery({
     queryKey: ["shelf-sku-images", account, skuImageBrowserSkuId, skuImageBrowserIncludeInactive],
     queryFn: () => ocrApi.listShelfSkuImages(account, skuImageBrowserSkuId, { include_inactive: skuImageBrowserIncludeInactive }),
-    enabled: shelfEnabled && tab === "skus" && Boolean(skuImageBrowserSkuId.trim()),
+    enabled: shelfEnabled && tab === "skus" && skuWorkspaceTab === "dataset" && Boolean(skuImageBrowserSkuId.trim()),
+    refetchInterval: skuWorkspaceTab === "dataset" && Boolean(skuImageBrowserSkuId.trim()) ? 12_000 : false,
   });
 
   const assetSubcategoriesQuery = useQuery({
@@ -1789,6 +2365,67 @@ export function AccountShelfPage({ account }: Props) {
     onError: (e) => toast.error("No se pudo guardar config Shelf", { description: e instanceof Error ? e.message : "Error inesperado" }),
   });
 
+  useEffect(() => {
+    if (!configQuery.data) return;
+    const sr = (configQuery.data as Record<string, unknown>).shelf_recognition as Record<string, unknown> | undefined;
+    const oa = (sr?.ocr_sku_assist ?? {}) as Record<string, unknown>;
+    const sb = (oa.score_boost ?? {}) as Record<string, unknown>;
+    setOcrAssistDraft({
+      enabled: Boolean(oa.enabled),
+      only_when_ambiguous: oa.only_when_ambiguous !== false,
+      apply_to_top_k: Number(oa.apply_to_top_k) || 3,
+      reorder_top_candidates: oa.reorder_top_candidates !== false,
+      prefetch_catalog_by_category: oa.prefetch_catalog_by_category !== false,
+      prefetch_max_rows: Number(oa.prefetch_max_rows) || 2000,
+      num_predict: Number(oa.num_predict) || 128,
+      num_ctx: Number(oa.num_ctx) || 1024,
+      timeout_sec: Number(oa.timeout_sec) || 12,
+      min_text_chars: Number(oa.min_text_chars) || 4,
+      score_boost_barcode_exact: Number(sb.barcode_exact) || 0.20,
+      score_boost_marca: Number(sb.marca) || 0.05,
+      score_boost_tamano: Number(sb.tamano) || 0.05,
+      score_boost_variante: Number(sb.variante) || 0.03,
+      score_penalty_on_conflict: Number(oa.score_penalty_on_conflict) || 0.05,
+    });
+    setOcrAssistDirty(false);
+  }, [configQuery.data]);
+
+  const saveOcrAssistMutation = useMutation({
+    mutationFn: async () =>
+      ocrApi.patchShelfConfig(account, {
+        config_name: "default",
+        version: "next",
+        is_active: true,
+        shelf_recognition: {
+          ocr_sku_assist: {
+            enabled: ocrAssistDraft.enabled,
+            only_when_ambiguous: ocrAssistDraft.only_when_ambiguous,
+            apply_to_top_k: ocrAssistDraft.apply_to_top_k,
+            reorder_top_candidates: ocrAssistDraft.reorder_top_candidates,
+            prefetch_catalog_by_category: ocrAssistDraft.prefetch_catalog_by_category,
+            prefetch_max_rows: ocrAssistDraft.prefetch_max_rows,
+            num_predict: ocrAssistDraft.num_predict,
+            num_ctx: ocrAssistDraft.num_ctx,
+            timeout_sec: ocrAssistDraft.timeout_sec,
+            min_text_chars: ocrAssistDraft.min_text_chars,
+            score_boost: {
+              barcode_exact: ocrAssistDraft.score_boost_barcode_exact,
+              marca: ocrAssistDraft.score_boost_marca,
+              tamano: ocrAssistDraft.score_boost_tamano,
+              variante: ocrAssistDraft.score_boost_variante,
+            },
+            score_penalty_on_conflict: ocrAssistDraft.score_penalty_on_conflict,
+          },
+        },
+      }),
+    onSuccess: async () => {
+      await Promise.all([configQuery.refetch(), activeConfigQuery.refetch()]);
+      setOcrAssistDirty(false);
+      toast.success("OCR SKU Assist configurado", { description: "El cambio aplica a los próximos jobs de recognition." });
+    },
+    onError: (e) => toast.error("No se pudo guardar OCR SKU Assist", { description: e instanceof Error ? e.message : "Error inesperado" }),
+  });
+
   const patchShelfImageRoleMutation = useMutation({
     mutationFn: async (args: { skuId: string; imageId: number | string; dataset_role: ShelfDatasetRole; dataset_split?: string }) =>
       ocrApi.patchShelfSkuImageDatasetRole(account, args.skuId, args.imageId, {
@@ -1807,22 +2444,114 @@ export function AccountShelfPage({ account }: Props) {
 
   const createHardNegativeMutation = useMutation({
     mutationFn: async () => {
-      if (!hardNegativeSkuId.trim()) throw new Error("Selecciona el SKU base.");
-      if (!hardNegativeTargetSkuId.trim()) throw new Error("Selecciona el SKU negativo.");
+      if (!hardNegativeSkuId.trim()) throw new Error("Selecciona el SKU correcto.");
+      if (!hardNegativeTargetSkuId.trim()) throw new Error("Selecciona el SKU parecido pero incorrecto.");
       return ocrApi.createShelfHardNegative(account, hardNegativeSkuId.trim(), {
         negative_sku_id: hardNegativeTargetSkuId.trim(),
         reason: hardNegativeReason.trim() || "similar_packaging",
         note: hardNegativeNote.trim() || undefined,
-        user: "frontend_user",
+        user: "frontend",
       });
     },
-    onSuccess: async () => {
+    onSuccess: async (_data, _vars, _ctx) => {
+      const anchor = hardNegativeSkuId.trim();
+      const negative = hardNegativeTargetSkuId.trim();
+      setSavedSkuConfusionKeys((prev) => {
+        const next = new Set(prev);
+        next.add(skuConfusionKey(anchor, negative));
+        return next;
+      });
       await hardNegativesQuery.refetch();
+      if (skuCatalogDetailCode.trim() === anchor) {
+        await catalogSkuHardNegativesQuery.refetch();
+      }
       setHardNegativeTargetSkuId("");
       setHardNegativeNote("");
-      toast.success("Hard negative guardado");
+      toast.success(`Confusión guardada: ${negative} se marcó como similar pero incorrecto para ${anchor}.`);
     },
-    onError: (e) => toast.error("No se pudo guardar hard negative", { description: e instanceof Error ? e.message : "Error inesperado" }),
+    onError: () => toast.error("No se pudo guardar la confusión frecuente. Inténtalo de nuevo."),
+  });
+
+  const markSkuConfusionMutation = useMutation({
+    mutationFn: async (args: { anchorSku: string; negativeSku: string; note?: string }) => {
+      const anchor = args.anchorSku.trim();
+      const negative = args.negativeSku.trim();
+      if (!anchor) throw new Error("Selecciona primero el SKU correcto.");
+      if (!negative) throw new Error("Selecciona el SKU confundido.");
+      if (skuCodesEqual(anchor, negative)) throw new Error("El SKU confundido no puede ser el mismo que el correcto.");
+      return ocrApi.createShelfHardNegative(account, anchor, {
+        negative_sku_id: negative,
+        reason: "similar_packaging",
+        note: args.note?.trim() || "Creado desde curaduría frontend",
+        user: "frontend",
+      });
+    },
+    onSuccess: async (_data, variables) => {
+      const anchor = variables.anchorSku.trim();
+      const negative = variables.negativeSku.trim();
+      setSavedSkuConfusionKeys((prev) => {
+        const next = new Set(prev);
+        next.add(skuConfusionKey(anchor, negative));
+        return next;
+      });
+      if (hardNegativeSkuId.trim() === anchor || !hardNegativeSkuId.trim()) {
+        setHardNegativeSkuId(anchor);
+        await hardNegativesQuery.refetch();
+      }
+      if (skuCatalogDetailCode.trim() === anchor) {
+        await catalogSkuHardNegativesQuery.refetch();
+      }
+      toast.success(`Confusión guardada: ${negative} se marcó como similar pero incorrecto para ${anchor}.`);
+    },
+    onError: () => toast.error("No se pudo guardar la confusión frecuente. Inténtalo de nuevo."),
+  });
+
+  const markAllSkuConfusionsMutation = useMutation({
+    mutationFn: async (args: { anchorSku: string; negativeSkus: string[]; note?: string }) => {
+      const anchor = args.anchorSku.trim();
+      const negatives = [...new Set(args.negativeSkus.map((sku) => sku.trim()).filter((sku) => sku && !skuCodesEqual(sku, anchor)))];
+      if (!anchor) throw new Error("Selecciona primero el SKU correcto.");
+      if (!negatives.length) throw new Error("No hay candidatos pendientes para marcar.");
+      const results = await Promise.allSettled(
+        negatives.map((negative) =>
+          ocrApi.createShelfHardNegative(account, anchor, {
+            negative_sku_id: negative,
+            reason: "similar_packaging",
+            note: args.note?.trim() || "Creado desde curaduría frontend (lote)",
+            user: "frontend",
+          }),
+        ),
+      );
+      const succeeded = results.filter((result) => result.status === "fulfilled").length;
+      const failed = results.length - succeeded;
+      return { anchor, negatives, succeeded, failed, total: negatives.length };
+    },
+    onSuccess: async (result) => {
+      setSavedSkuConfusionKeys((prev) => {
+        const next = new Set(prev);
+        for (const negative of result.negatives) {
+          next.add(skuConfusionKey(result.anchor, negative));
+        }
+        return next;
+      });
+      if (hardNegativeSkuId.trim() === result.anchor || !hardNegativeSkuId.trim()) {
+        setHardNegativeSkuId(result.anchor);
+        await hardNegativesQuery.refetch();
+      }
+      if (skuCatalogDetailCode.trim() === result.anchor) {
+        await catalogSkuHardNegativesQuery.refetch();
+      }
+      if (result.failed > 0) {
+        toast.warning(`Confusiones guardadas: ${result.succeeded}/${result.total}. ${result.failed} fallaron.`);
+        return;
+      }
+      toast.success(
+        result.total === 1
+          ? `Confusión guardada: ${result.negatives[0]} se marcó como similar pero incorrecto para ${result.anchor}.`
+          : `Confusiones guardadas: ${result.total} SKUs marcados como similares pero incorrectos para ${result.anchor}.`,
+      );
+    },
+    onError: () => toast.error("No se pudo guardar la confusión frecuente. Inténtalo de nuevo."),
   });
 
   const resolveReviewMutation = useMutation({
@@ -2069,7 +2798,7 @@ export function AccountShelfPage({ account }: Props) {
   }, [resultsSearchQuery, resultsViewFilter, selectedTrainingCropKeySet, shelfResultEntries]);
 
   const resultsThumbHeightPx = Math.round(176 * (resultsThumbZoom / 100));
-  const resultsGridMinCol = resultsThumbZoom >= 150 ? "280px" : resultsThumbZoom <= 80 ? "160px" : "220px";
+  const resultsGridMinCol = resultsThumbZoom >= 150 ? "360px" : resultsThumbZoom <= 80 ? "300px" : "320px";
 
   const applyResultsThumbPreset = (preset: "sm" | "md" | "lg") => {
     setResultsThumbScale(preset);
@@ -2391,13 +3120,29 @@ export function AccountShelfPage({ account }: Props) {
       ? (selectedArtifactsData.summary as Record<string, unknown>).tray_count
       : null;
     const trayCount = typeof trayCountFromSummary === "number" ? trayCountFromSummary : trayRows.length;
+    const imageSummary = selectedArtifactsData?.summary && typeof selectedArtifactsData.summary === "object"
+      ? parseHardNegativeSummary(selectedArtifactsData.summary as Record<string, unknown>)
+      : { total: 0, pairs: [] };
+    const cropsWithHardNegativePenalty = rows.filter((row) => cropHasHardNegativePenalty(row)).length;
     return {
       resultsCount: rows.length,
       fallbackCount,
       reviewCount,
       trayCount,
+      hardNegativeSummary: imageSummary,
+      cropsWithHardNegativePenalty,
     };
   }, [selectedArtifactsData, selectedArtifactsResults, shelfResults, trayRows.length]);
+
+  const jobHardNegativeSummary = useMemo(() => {
+    const root = resultsQuery.data?.result_json && typeof resultsQuery.data.result_json === "object"
+      ? (resultsQuery.data.result_json as Record<string, unknown>)
+      : null;
+    const summary = root?.summary && typeof root.summary === "object"
+      ? (root.summary as Record<string, unknown>)
+      : null;
+    return parseHardNegativeSummary(summary);
+  }, [resultsQuery.data?.result_json]);
 
   const shelfConfigInfo = useMemo(() => {
     const cfg = configQuery.data ?? {};
@@ -2541,6 +3286,178 @@ export function AccountShelfPage({ account }: Props) {
     return filteredSkusCatalog.slice(start, start + skuCatalogPageSize);
   }, [filteredSkusCatalog, skuCatalogPage, skuCatalogPageSize]);
 
+  const datasetSkuCoverageMapBase = useMemo(() => {
+    const map = new Map<string, { images: number; indexable: number }>();
+    const register = (rawKey: unknown, images: number, indexable: number) => {
+      const key = normalizeSkuCoverageLookupKey(rawKey);
+      if (!key) return;
+      const entry = { images, indexable };
+      map.set(key, entry);
+      map.set(key.toUpperCase(), entry);
+      map.set(key.toLowerCase(), entry);
+    };
+    for (const row of datasetSummaryBySkuRows(accountDatasetCoverageQuery.data)) {
+      const counts = datasetSummaryRowCounts(row);
+      for (const alias of [row.sku_id, row.sku_code, row.cod_lucky, row.sku_code_normalized, row.id]) {
+        register(alias, counts.images, counts.indexable);
+      }
+    }
+    return map;
+  }, [accountDatasetCoverageQuery.data]);
+
+  const filteredCatalogSkus = useMemo(() => {
+    return filteredSkusCatalog.filter((sku) => {
+      const code = getSkuCodeValue(sku);
+      const coverage = code ? datasetSkuCoverageMapBase.get(code) ?? datasetSkuCoverageMapBase.get(code.toUpperCase()) : undefined;
+      const imageCount = coverage?.images ?? 0;
+      const indexableCount = coverage?.indexable ?? 0;
+      if (datasetCoverageFilter === "with_images" && imageCount <= 0) return false;
+      if (datasetCoverageFilter === "without_images" && imageCount > 0) return false;
+      if (datasetCoverageFilter === "indexable" && indexableCount <= 0) return false;
+      return true;
+    });
+  }, [datasetCoverageFilter, datasetSkuCoverageMapBase, filteredSkusCatalog]);
+
+  const catalogTotalPages = useMemo(() => {
+    return Math.max(1, Math.ceil(filteredCatalogSkus.length / skuCatalogPageSize));
+  }, [filteredCatalogSkus.length, skuCatalogPageSize]);
+
+  const paginatedCatalogSkus = useMemo(() => {
+    const start = (skuCatalogPage - 1) * skuCatalogPageSize;
+    return filteredCatalogSkus.slice(start, start + skuCatalogPageSize);
+  }, [filteredCatalogSkus, skuCatalogPage, skuCatalogPageSize]);
+
+  const filteredDatasetSkus = filteredCatalogSkus;
+
+  const datasetCatalogTotalPages = useMemo(() => {
+    return Math.max(1, Math.ceil(filteredDatasetSkus.length / skuCatalogPageSize));
+  }, [filteredDatasetSkus.length, skuCatalogPageSize]);
+
+  const paginatedDatasetSkus = useMemo(() => {
+    const start = (skuCatalogPage - 1) * skuCatalogPageSize;
+    return filteredDatasetSkus.slice(start, start + skuCatalogPageSize);
+  }, [filteredDatasetSkus, skuCatalogPage, skuCatalogPageSize]);
+
+  const datasetPageSummaryQueries = useQueries({
+    queries: paginatedDatasetSkus.map((sku) => {
+      const code = getSkuCodeValue(sku);
+      return {
+        queryKey: ["shelf-dataset-summary-sku", account, code],
+        queryFn: () => ocrApi.getShelfDatasetSummary(account, code),
+        enabled: shelfEnabled && tab === "skus" && ["catalogo", "cargas", "dataset", "pruebas"].includes(skuWorkspaceTab) && Boolean(code.trim()),
+        staleTime: 45_000,
+      };
+    }),
+  });
+
+  const datasetSkuCoverageMap = useMemo(() => {
+    const map = new Map(datasetSkuCoverageMapBase);
+    const register = (rawKey: unknown, images: number, indexable: number) => {
+      const key = normalizeSkuCoverageLookupKey(rawKey);
+      if (!key) return;
+      const entry = { images, indexable };
+      map.set(key, entry);
+      map.set(key.toUpperCase(), entry);
+      map.set(key.toLowerCase(), entry);
+    };
+    paginatedDatasetSkus.forEach((sku, idx) => {
+      const summary = datasetPageSummaryQueries[idx]?.data;
+      const totals = datasetSummaryTotalsFromResponse(summary);
+      const counts = {
+        images: totals.total_images,
+        indexable: totals.indexable_images,
+      };
+      if (!counts.images && !counts.indexable) return;
+      for (const alias of skuCoverageAliasKeys(sku)) {
+        register(alias, counts.images, counts.indexable);
+      }
+      const summarySkuId = firstNonEmptyString(summary?.sku_id);
+      if (summarySkuId) register(summarySkuId, counts.images, counts.indexable);
+    });
+    for (const sku of skusQuery.data ?? []) {
+      const aliases = skuCoverageAliasKeys(sku);
+      let entry: { images: number; indexable: number } | undefined;
+      for (const alias of aliases) {
+        entry = map.get(alias) ?? map.get(alias.toUpperCase()) ?? map.get(alias.toLowerCase());
+        if (entry) break;
+      }
+      if (entry) {
+        for (const alias of aliases) register(alias, entry.images, entry.indexable);
+      }
+    }
+    return map;
+  }, [datasetPageSummaryQueries, datasetSkuCoverageMapBase, paginatedDatasetSkus, skusQuery.data]);
+
+  const datasetAccountTotals = useMemo(() => {
+    const totals = datasetSummaryTotalsFromResponse(accountDatasetCoverageQuery.data);
+    const skusWithImages = Array.from(datasetSkuCoverageMap.values()).filter((row) => row.images > 0).length;
+    const skusWithoutImages = Math.max(0, (skusQuery.data ?? []).length - skusWithImages);
+    const skuRows = datasetSummaryBySkuRows(accountDatasetCoverageQuery.data);
+    return {
+      images: totals.total_images,
+      indexable: totals.indexable_images,
+      skus: skuRows.length || datasetSkuCoverageMap.size,
+      skusWithImages,
+      skusWithoutImages,
+    };
+  }, [accountDatasetCoverageQuery.data, datasetSkuCoverageMap, skusQuery.data]);
+
+  const filteredDatasetImages = useMemo(() => {
+    return (skuImagesQuery.data ?? []).filter((image) => {
+      const row = image as Record<string, unknown>;
+      const role = firstNonEmptyString(row.dataset_role) || "reference_active";
+      if (datasetImageRoleFilter !== "all" && role !== datasetImageRoleFilter) return false;
+      const indexableMeta = imageIndexableMeta(row);
+      if (datasetImageIndexableFilter !== "all" && indexableMeta.bucket !== datasetImageIndexableFilter) return false;
+      return true;
+    });
+  }, [datasetImageIndexableFilter, datasetImageRoleFilter, skuImagesQuery.data]);
+
+  const selectDatasetSku = (code: string) => {
+    const normalized = code.trim();
+    if (!normalized) return;
+    setSelectedSkuId(normalized);
+    setSkuImageBrowserSkuId(normalized);
+    setDatasetSummarySkuId(normalized);
+    setHardNegativeSkuId(normalized);
+    setTestSkuId(normalized);
+  };
+
+  const selectCatalogSku = (code: string) => {
+    const normalized = code.trim();
+    if (!normalized) return;
+    selectDatasetSku(normalized);
+    setSkuCatalogDetailCode(normalized);
+  };
+
+  const loadSkuToForm = (sku: ShelfSku) => {
+    const code = getSkuCodeValue(sku);
+    const row = sku as Record<string, unknown>;
+    setSkuForm({
+      sku_code: code,
+      sku_name: getSkuNameValue(sku),
+      brand: getSkuBrandValue(sku),
+      family: getSkuFamilyValue(sku),
+      variant: firstNonEmptyString(row.variant, row.formato),
+      size_text: firstNonEmptyString(row.size_text, row.tamano),
+      barcode: firstNonEmptyString(row.barcode, row.ean),
+      estado: getSkuStatusValue(sku),
+      subcategoria: getSkuSubcategoryValue(sku),
+      segmento: getSkuSegmentValue(sku),
+      forma: firstNonEmptyString(row.forma),
+      fabricante: getSkuManufacturerValue(sku),
+      fragancia_variante: firstNonEmptyString(row.fragancia_variante),
+      pais: firstNonEmptyString(row.pais),
+      grupo: getSkuGroupValue(sku),
+      segmento_funcional: firstNonEmptyString(row.segmento_funcional),
+      category_cuenta: firstNonEmptyString(row.category_cuenta),
+      x_ancho: firstNonEmptyString(row.x_ancho),
+      y_alto: firstNonEmptyString(row.y_alto),
+      z_profundidad: firstNonEmptyString(row.z_profundidad),
+      metadata_json: JSON.stringify(getSkuMetadataValue(sku) ?? {}, null, 2),
+    });
+  };
+
   const activeSkuDeleteId = skuDeleteTargetId.trim() || selectedSkuId.trim() || skuImageBrowserSkuId.trim() || testSkuId.trim();
   const activeSkuDeleteInfo = useMemo(() => {
     if (!activeSkuDeleteId) return null;
@@ -2569,6 +3486,83 @@ export function AccountShelfPage({ account }: Props) {
       inactive: Math.max(0, total - active),
     };
   }, [skuImagesQuery.data]);
+
+  const activeSkuEmbeddingSummary = useMemo(() => {
+    const rows = (skuImagesQuery.data ?? []).map((image) => image as Record<string, unknown>);
+    if (!rows.length) return { available: false, total: 0, complete: 0, partial: 0, pending: 0, fallback: 0, failed: 0, notIndexable: 0, unknown: 0 };
+    const hasBackendContract = rows.some((row) => imageHasExplicitEmbeddingEvidence(row));
+    if (!hasBackendContract) {
+      return { available: false, total: rows.length, complete: 0, partial: 0, pending: 0, fallback: 0, failed: 0, notIndexable: 0, unknown: 0 };
+    }
+    const counts = { complete: 0, partial: 0, pending: 0, fallback: 0, failed: 0, notIndexable: 0, unknown: 0 };
+    for (const row of rows) {
+      const status = firstNonEmptyString(row.embedding_status, row.embedding_state)?.toLowerCase() || "unknown";
+      if (status === "complete") counts.complete += 1;
+      else if (status === "partial") counts.partial += 1;
+      else if (status === "pending") counts.pending += 1;
+      else if (status === "fallback") counts.fallback += 1;
+      else if (status === "failed") counts.failed += 1;
+      else if (status === "not_indexable") counts.notIndexable += 1;
+      else counts.unknown += 1;
+    }
+    return { available: true, total: rows.length, ...counts };
+  }, [skuImagesQuery.data]);
+
+  const resolveSkuDatasetCoverageFromMap = (code: string) => {
+    for (const alias of [code, code.toUpperCase(), code.toLowerCase()]) {
+      const hit = datasetSkuCoverageMap.get(alias);
+      if (hit) return hit;
+    }
+    return { images: 0, indexable: 0 };
+  };
+
+  const activeSkuDatasetSummary = useMemo(() => {
+    if (!activeSkuWorkspaceId) return null;
+    if (datasetSummarySkuId.trim() === activeSkuWorkspaceId && datasetSummaryQuery.data) {
+      return datasetSummaryTotalsFromResponse(datasetSummaryQuery.data);
+    }
+    const pageIdx = paginatedDatasetSkus.findIndex((sku) => getSkuCodeValue(sku) === activeSkuWorkspaceId);
+    if (pageIdx >= 0 && datasetPageSummaryQueries[pageIdx]?.data) {
+      return datasetSummaryTotalsFromResponse(datasetPageSummaryQueries[pageIdx].data);
+    }
+    const coverage = resolveSkuDatasetCoverageFromMap(activeSkuWorkspaceId);
+    if (coverage.images > 0 || coverage.indexable > 0) {
+      return {
+        total_images: coverage.images,
+        indexable_images: coverage.indexable,
+        non_indexable_images: Math.max(0, coverage.images - coverage.indexable),
+      };
+    }
+    return null;
+  }, [
+    activeSkuWorkspaceId,
+    datasetPageSummaryQueries,
+    datasetSkuCoverageMap,
+    datasetSummaryQuery.data,
+    datasetSummarySkuId,
+    paginatedDatasetSkus,
+  ]);
+
+  const activeSkuDatasetSummaryLoading = Boolean(
+    activeSkuWorkspaceId
+    && !activeSkuDatasetSummary
+    && (
+      (datasetSummarySkuId.trim() === activeSkuWorkspaceId && datasetSummaryQuery.isFetching)
+      || datasetPageSummaryQueries.some((query, idx) => getSkuCodeValue(paginatedDatasetSkus[idx] ?? {}) === activeSkuWorkspaceId && query.isFetching)
+    ),
+  );
+
+  const resolveSkuDatasetCoverage = (sku: ShelfSku) => {
+    for (const alias of skuCoverageAliasKeys(sku)) {
+      const hit = datasetSkuCoverageMap.get(alias) ?? datasetSkuCoverageMap.get(alias.toUpperCase()) ?? datasetSkuCoverageMap.get(alias.toLowerCase());
+      if (hit && (hit.images > 0 || hit.indexable > 0)) return hit;
+    }
+    const code = getSkuCodeValue(sku);
+    if (code === activeSkuWorkspaceId && activeSkuDatasetSummary) {
+      return { images: activeSkuDatasetSummary.total_images, indexable: activeSkuDatasetSummary.indexable_images };
+    }
+    return { images: 0, indexable: 0 };
+  };
 
   const recentTrainingDiagnostics = useMemo(() => {
     return recentSkuImageResponses
@@ -2661,6 +3655,13 @@ export function AccountShelfPage({ account }: Props) {
   }, [skuCatalogPage, skuCatalogTotalPages]);
 
   useEffect(() => {
+    if (skuWorkspaceTab !== "dataset") return;
+    if (skuCatalogPage > datasetCatalogTotalPages) {
+      setSkuCatalogPage(datasetCatalogTotalPages);
+    }
+  }, [datasetCatalogTotalPages, skuCatalogPage, skuWorkspaceTab]);
+
+  useEffect(() => {
     if (!shelfJobImages.length) {
       if (typeof selectedArtifactsImageId === "number") setSelectedArtifactsImageId(null);
       return;
@@ -2699,6 +3700,40 @@ export function AccountShelfPage({ account }: Props) {
       return matchesState && matchesText;
     });
   }, [reviewQueueQuery.data, reviewSearch, reviewStateFilter]);
+
+  const assetsSummary = useMemo(() => {
+    const rows = assetsQuery.data ?? [];
+    return {
+      total: rows.length,
+      active: rows.filter((asset) => asset.is_active !== false && asset.is_active !== 0).length,
+      withSku: rows.filter((asset) => Boolean(firstNonEmptyString(asset.sku_id))).length,
+    };
+  }, [assetsQuery.data]);
+
+  const selectedReviewItem = useMemo(() => {
+    if (!selectedReviewItemId) return null;
+    return (reviewQueueQuery.data ?? []).find((item) => String(item.item_id ?? item.id ?? "") === selectedReviewItemId) ?? null;
+  }, [reviewQueueQuery.data, selectedReviewItemId]);
+
+  useEffect(() => {
+    if (!selectedReviewItemId) return;
+    const stillVisible = filteredReviewItems.some((item) => String(item.item_id ?? item.id ?? "") === selectedReviewItemId);
+    if (!stillVisible) setSelectedReviewItemId("");
+  }, [filteredReviewItems, selectedReviewItemId]);
+
+  const reviewQueueSummary = useMemo(() => {
+    const rows = reviewQueueQuery.data ?? [];
+    const counts = { total: rows.length, low: 0, medium: 0, unknown: 0, high: 0, other: 0 };
+    for (const item of rows) {
+      const state = String(item.confidence_state ?? "").toLowerCase();
+      if (state === "low_confidence") counts.low += 1;
+      else if (state === "medium_confidence") counts.medium += 1;
+      else if (state === "unknown_sku") counts.unknown += 1;
+      else if (state === "high_confidence") counts.high += 1;
+      else counts.other += 1;
+    }
+    return counts;
+  }, [reviewQueueQuery.data]);
 
   function onBulkFilePick(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
@@ -2806,177 +3841,263 @@ export function AccountShelfPage({ account }: Props) {
       </div>
 
       {tab === "jobs" ? (
-        <Card className="border-white/10 bg-white/5">
-          <CardHeader><CardTitle>Crear y monitorear Shelf jobs</CardTitle></CardHeader>
-          <CardContent className="space-y-3">
-            <div className="rounded-lg border border-cyan-300/20 bg-cyan-500/5 p-3">
-              <div className="mb-3">
-                <p className="text-sm font-semibold">Subir imagen de prueba</p>
-                <p className="text-xs text-slate-300">Este es el camino más simple para probar reconocimiento: subes la imagen aquí, el frontend obtiene `image_file_ids` y luego crea el shelf job.</p>
-              </div>
-              <UploadPanel
-                files={selectedJobFiles}
-                onFilesChange={setSelectedJobFiles}
-                onUpload={() => uploadJobImagesMutation.mutate()}
-                isUploading={uploadJobImagesMutation.isPending}
-              />
-              {uploadedJobFileIds.length ? (
-                <div className="mt-3 rounded-lg border border-white/10 bg-black/20 p-3 text-xs text-slate-300">
-                  <p className="font-medium text-slate-100">image_file_ids listos para el job</p>
-                  <div className="mt-2 space-y-1">
-                    {uploadedJobFileIds.map((fileId) => <p key={`job-file-${fileId}`} className="font-mono">{fileId}</p>)}
-                  </div>
-                </div>
-              ) : null}
-            </div>
-
-            <div className="grid gap-3 md:grid-cols-2">
-              <div><Label>config_name</Label><Input value={jobPayload.config_name ?? ""} onChange={(e) => setJobPayload((p) => ({ ...p, config_name: e.target.value }))} /></div>
-              <div><Label>id_pdv (obligatorio)</Label><Input value={jobPayload.id_pdv} onChange={(e) => setJobPayload((p) => ({ ...p, id_pdv: e.target.value }))} /></div>
+        <div className="space-y-4">
+          <div className="rounded-xl border border-cyan-300/20 bg-gradient-to-br from-cyan-500/10 via-slate-950/60 to-slate-950/80 p-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
-                <Label>processing_mode</Label>
-                <select
-                  className="h-10 w-full rounded-md border border-white/10 bg-slate-900 px-3 text-sm"
-                  value={jobPayload.processing_mode ?? "recognition"}
-                  onChange={(e) => setJobPayload((p) => ({ ...p, processing_mode: e.target.value }))}
-                >
-                  <option value="recognition">recognition</option>
-                  <option value="crop_extraction">crop_extraction</option>
-                </select>
+                <p className="text-sm font-semibold text-slate-100">Jobs · crear, monitorear y retomar</p>
+                <p className="mt-1 text-xs text-slate-300">Flujo recomendado: sube la imagen, configura PDV y modo, crea el job y abre resultados para curar crops.</p>
               </div>
-              <div><Label>subcategoria</Label><Input value={jobPayload.subcategoria ?? ""} onChange={(e) => setJobPayload((p) => ({ ...p, subcategoria: e.target.value }))} /></div>
-              <div><Label>usuario_relevo</Label><Input value={jobPayload.usuario_relevo ?? ""} onChange={(e) => setJobPayload((p) => ({ ...p, usuario_relevo: e.target.value }))} /></div>
-            </div>
-            <div className="grid gap-3 md:grid-cols-2">
-              <div><Label>image_file_ids (uno por linea)</Label><Textarea value={imageFileIdsText} onChange={(e) => setImageFileIdsText(e.target.value)} rows={4} /></div>
-              <div><Label>image_paths (uno por linea)</Label><Textarea value={imagePathsText} onChange={(e) => setImagePathsText(e.target.value)} rows={4} /></div>
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
-              <Button onClick={() => createJobMutation.mutate()} disabled={createJobMutation.isPending}>Crear shelf job</Button>
-              {jobId ? <Badge variant="secondary">job_id: {jobId}</Badge> : null}
-            </div>
-            <div className="grid gap-3 md:grid-cols-2">
-              <div><Label>Monitorear job_id</Label><Input value={selectedJobId} onChange={(e) => setSelectedJobId(e.target.value)} placeholder="2026-..." /></div>
-              <div className="flex items-end gap-2"><Button variant="outline" onClick={() => { jobQuery.refetch(); eventsQuery.refetch(); metricsQuery.refetch(); }}>Refresh</Button></div>
-            </div>
-            {jobQuery.data ? (
-              <div className="rounded-lg border border-white/10 bg-black/20 p-3 text-sm">
-                <div className="flex items-center gap-2">{statusBadge(jobQuery.data.status)}<span className="font-mono">{jobQuery.data.job_id}</span></div>
-                <p className="mt-1 text-xs text-slate-300">imagenes: {jobQuery.data.processed_images ?? 0}/{jobQuery.data.total_images ?? 0} | failed: {jobQuery.data.failed_images ?? 0}</p>
+              <div className="flex flex-wrap gap-2">
+                {jobId ? <Badge variant="secondary" className="font-mono text-[11px]">Último: {jobId}</Badge> : null}
+                {selectedJobId ? <Badge variant="outline" className="font-mono text-[11px]">Activo: {selectedJobId}</Badge> : null}
+                <Badge variant="outline">{recentShelfJobs.length} en historial</Badge>
               </div>
-            ) : null}
+            </div>
+          </div>
 
-            <div className="rounded-xl border border-cyan-300/20 bg-cyan-500/5 p-4">
-              <div className="flex flex-wrap items-start justify-between gap-3">
-                <div>
-                  <p className="text-sm font-semibold text-slate-100">Retomar análisis anteriores</p>
-                  <p className="text-xs text-slate-300">Puedes volver a un job previo de Shelf, cargar sus resultados y seguir revisando crops o entrenamiento sin volver a subir la imagen.</p>
+          <div className="grid gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(280px,0.85fr)]">
+            <Card className="border-white/10 bg-white/5">
+              <CardHeader className="pb-3">
+                <CardTitle className="text-base">Nuevo Shelf job</CardTitle>
+                <p className="text-xs font-normal text-slate-400">Paso 1: imagen · Paso 2: configuración · Paso 3: crear</p>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="rounded-xl border border-cyan-300/20 bg-cyan-500/5 p-4">
+                  <p className="text-sm font-semibold text-slate-100">1. Subir imagen</p>
+                  <p className="mt-1 text-xs text-slate-300">El upload genera <span className="font-mono">image_file_ids</span> listos para el job de recognition.</p>
+                  <div className="mt-3">
+                    <UploadPanel
+                      files={selectedJobFiles}
+                      onFilesChange={setSelectedJobFiles}
+                      onUpload={() => uploadJobImagesMutation.mutate()}
+                      isUploading={uploadJobImagesMutation.isPending}
+                    />
+                  </div>
+                  {uploadedJobFileIds.length ? (
+                    <div className="mt-3 rounded-lg border border-emerald-300/25 bg-emerald-500/10 p-3 text-xs text-emerald-50">
+                      <p className="font-medium text-emerald-100">{uploadedJobFileIds.length} image_file_id(s) listos</p>
+                      <div className="mt-2 max-h-24 space-y-1 overflow-y-auto">
+                        {uploadedJobFileIds.map((fileId) => <p key={`job-file-${fileId}`} className="font-mono text-[11px]">{fileId}</p>)}
+                      </div>
+                    </div>
+                  ) : null}
                 </div>
-                <Button variant="outline" onClick={() => recentShelfJobsQuery.refetch()} disabled={recentShelfJobsQuery.isFetching}>
-                  Refrescar historial
-                </Button>
-              </div>
-              <div className="mt-3 flex flex-wrap gap-2">
-                {([
-                  ["all", "Todos"],
-                  ["recognition", "Reconocimiento"],
-                  ["crop_extraction", "Extracción crops"],
-                  ["sku_test", "Pruebas SKU"],
-                ] as const).map(([key, label]) => (
-                  <Button
-                    key={`shelf-jobs-filter-${key}`}
-                    size="sm"
-                    variant={shelfJobsHistoryFilter === key ? "default" : "outline"}
-                    onClick={() => setShelfJobsHistoryFilter(key)}
-                  >
-                    {label}
-                  </Button>
-                ))}
-              </div>
-              <div className="mt-3 grid gap-3 md:grid-cols-[1fr_auto]">
-                <Input
-                  value={recentShelfJobSearch}
-                  onChange={(e) => setRecentShelfJobSearch(e.target.value)}
-                  placeholder="Buscar por job_id, tipo, PDV o subcategoría..."
-                />
-                <div className="rounded-md border border-white/10 bg-slate-950/40 px-3 py-2 text-sm text-slate-300">
-                  {recentShelfJobs.length} visibles
-                </div>
-              </div>
-              {recentShelfJobsQuery.isLoading ? (
-                <p className="mt-3 text-sm text-slate-400">Cargando jobs recientes de Shelf...</p>
-              ) : recentShelfJobsQuery.error instanceof HttpError ? (
-                <p className="mt-3 text-sm text-rose-300">No se pudo cargar el historial reciente: {recentShelfJobsQuery.error.detail}</p>
-              ) : recentShelfJobs.length ? (
-                <div className="mt-4 grid gap-3 xl:grid-cols-2">
-                  {recentShelfJobs.map((recentJob) => {
-                    const isSelected = recentJob.job_id === selectedJobId;
-                    const recentJobDetail = recentShelfJobDetailMap.get(recentJob.job_id);
-                    const recentJobPreview = recentJobCardPreview(recentJobDetail);
-                    const recentTrace = getShelfJobTraceInfo(recentJobDetail);
-                    return (
-                      <div
-                        key={`recent-shelf-job-${recentJob.job_id}`}
-                        className={`rounded-lg border p-3 ${isSelected ? "border-cyan-300/40 bg-cyan-500/10" : "border-white/10 bg-black/20"}`}
+
+                <div className="rounded-xl border border-white/10 bg-black/20 p-4">
+                  <p className="text-sm font-semibold text-slate-100">2. Configuración del job</p>
+                  <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                    <div><Label>PDV (obligatorio)</Label><Input value={jobPayload.id_pdv} onChange={(e) => setJobPayload((p) => ({ ...p, id_pdv: e.target.value }))} placeholder="PDV_001" /></div>
+                    <div>
+                      <Label>Modo de procesamiento</Label>
+                      <select
+                        className="h-10 w-full rounded-md border border-white/10 bg-slate-900 px-3 text-sm"
+                        value={jobPayload.processing_mode ?? "recognition"}
+                        onChange={(e) => setJobPayload((p) => ({ ...p, processing_mode: e.target.value }))}
                       >
-                        <div className="grid gap-3 md:grid-cols-[120px_1fr]">
-                          <div className="overflow-hidden rounded-lg border border-white/10 bg-slate-950/60">
-                            {recentJobPreview ? (
-                              // eslint-disable-next-line @next/next/no-img-element
-                              <img src={recentJobPreview} alt={`Preview ${recentJob.job_id}`} className="h-28 w-full object-cover" />
-                            ) : (
-                              <div className="flex h-28 items-center justify-center px-3 text-center text-xs text-slate-500">
-                                Sin miniatura
-                              </div>
-                            )}
+                        <option value="recognition">recognition</option>
+                        <option value="crop_extraction">crop_extraction</option>
+                      </select>
+                    </div>
+                    <div><Label>Subcategoría</Label><Input value={jobPayload.subcategoria ?? ""} onChange={(e) => setJobPayload((p) => ({ ...p, subcategoria: e.target.value }))} /></div>
+                    <div><Label>Usuario relevo</Label><Input value={jobPayload.usuario_relevo ?? ""} onChange={(e) => setJobPayload((p) => ({ ...p, usuario_relevo: e.target.value }))} /></div>
+                    <div className="sm:col-span-2"><Label>config_name</Label><Input value={jobPayload.config_name ?? ""} onChange={(e) => setJobPayload((p) => ({ ...p, config_name: e.target.value }))} /></div>
+                  </div>
+                  <details className="mt-3 rounded-lg border border-white/10 bg-slate-950/40 p-3">
+                    <summary className="cursor-pointer text-xs font-medium text-slate-300">IDs y rutas manuales (avanzado)</summary>
+                    <div className="mt-3 grid gap-3 md:grid-cols-2">
+                      <div><Label className="text-xs">image_file_ids</Label><Textarea className="text-xs" value={imageFileIdsText} onChange={(e) => setImageFileIdsText(e.target.value)} rows={4} /></div>
+                      <div><Label className="text-xs">image_paths</Label><Textarea className="text-xs" value={imagePathsText} onChange={(e) => setImagePathsText(e.target.value)} rows={4} /></div>
+                    </div>
+                  </details>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2 rounded-xl border border-emerald-300/20 bg-emerald-500/5 p-3">
+                  <Button onClick={() => createJobMutation.mutate()} disabled={createJobMutation.isPending}>
+                    {createJobMutation.isPending ? "Creando job…" : "3. Crear shelf job"}
+                  </Button>
+                  {jobId ? <Badge variant="default" className="font-mono">Creado: {jobId}</Badge> : null}
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card className="border-white/10 bg-white/5">
+              <CardHeader className="pb-3">
+                <CardTitle className="text-base">Job activo</CardTitle>
+                <p className="text-xs font-normal text-slate-400">Monitorea el estado antes de ir a Resultados</p>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <div>
+                  <Label>job_id a monitorear</Label>
+                  <Input className="mt-1 font-mono text-sm" value={selectedJobId} onChange={(e) => setSelectedJobId(e.target.value)} placeholder="2026-..." />
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Button variant="outline" className="flex-1" onClick={() => { jobQuery.refetch(); eventsQuery.refetch(); metricsQuery.refetch(); }}>
+                    Actualizar estado
+                  </Button>
+                  {selectedJobId ? (
+                    <Button className="flex-1" onClick={() => loadShelfJob(selectedJobId, "results")} disabled={!selectedJobId.trim()}>
+                      Ir a resultados
+                    </Button>
+                  ) : null}
+                </div>
+                {jobQuery.data ? (
+                  <div className="rounded-xl border border-white/10 bg-slate-950/50 p-4">
+                    <div className="flex flex-wrap items-center gap-2">
+                      {statusBadge(jobQuery.data.status)}
+                      <span className="font-mono text-sm text-slate-100">{jobQuery.data.job_id}</span>
+                    </div>
+                    <div className="mt-3">
+                      <div className="flex items-center justify-between text-[11px] text-slate-400">
+                        <span>Progreso imágenes</span>
+                        <span>{jobQuery.data.processed_images ?? 0}/{jobQuery.data.total_images ?? 0}</span>
+                      </div>
+                      <div className="mt-1.5 h-2 overflow-hidden rounded-full bg-white/10">
+                        <div
+                          className="h-full rounded-full bg-cyan-500/80 transition-all"
+                          style={{ width: `${Math.round(shelfJobProgressRatio(jobQuery.data) * 100)}%` }}
+                        />
+                      </div>
+                    </div>
+                    <p className="mt-2 text-xs text-slate-400">
+                      Fallidas: {jobQuery.data.failed_images ?? 0}
+                      {jobQuery.data.id_pdv ? ` · PDV: ${jobQuery.data.id_pdv}` : ""}
+                    </p>
+                  </div>
+                ) : (
+                  <div className="flex min-h-[140px] flex-col items-center justify-center rounded-xl border border-dashed border-white/15 bg-black/20 p-4 text-center">
+                    <p className="text-sm text-slate-300">Sin job cargado</p>
+                    <p className="mt-1 text-xs text-slate-500">Crea uno nuevo o elige del historial</p>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </div>
+
+          <div className="rounded-xl border border-cyan-300/20 bg-cyan-500/5 p-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <p className="text-sm font-semibold text-slate-100">Historial de jobs</p>
+                <p className="text-xs text-slate-300">Retoma análisis anteriores sin volver a subir la imagen.</p>
+              </div>
+              <Button variant="outline" size="sm" onClick={() => recentShelfJobsQuery.refetch()} disabled={recentShelfJobsQuery.isFetching}>
+                {recentShelfJobsQuery.isFetching ? "Actualizando…" : "Refrescar"}
+              </Button>
+            </div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {([
+                ["all", "Todos"],
+                ["recognition", "Reconocimiento"],
+                ["crop_extraction", "Extracción"],
+                ["sku_test", "Pruebas SKU"],
+              ] as const).map(([key, label]) => (
+                <Button
+                  key={`shelf-jobs-filter-${key}`}
+                  size="sm"
+                  variant={shelfJobsHistoryFilter === key ? "default" : "outline"}
+                  onClick={() => setShelfJobsHistoryFilter(key)}
+                >
+                  {label}
+                </Button>
+              ))}
+            </div>
+            <div className="mt-3 grid gap-3 md:grid-cols-[1fr_auto]">
+              <Input
+                value={recentShelfJobSearch}
+                onChange={(e) => setRecentShelfJobSearch(e.target.value)}
+                placeholder="Buscar job_id, PDV, subcategoría…"
+                className="h-9"
+              />
+              <Badge variant="outline" className="h-9 px-3 font-normal">{recentShelfJobs.length} visibles</Badge>
+            </div>
+            {recentShelfJobsQuery.isLoading ? (
+              <p className="mt-4 text-sm text-slate-400">Cargando jobs recientes…</p>
+            ) : recentShelfJobsQuery.error instanceof HttpError ? (
+              <p className="mt-4 text-sm text-rose-300">No se pudo cargar el historial: {recentShelfJobsQuery.error.detail}</p>
+            ) : recentShelfJobs.length ? (
+              <div className="mt-4 grid gap-3 xl:grid-cols-2">
+                {recentShelfJobs.map((recentJob) => {
+                  const isSelected = recentJob.job_id === selectedJobId;
+                  const recentJobDetail = recentShelfJobDetailMap.get(recentJob.job_id);
+                  const recentJobPreview = recentJobCardPreview(recentJobDetail);
+                  const recentTrace = getShelfJobTraceInfo(recentJobDetail);
+                  const progress = shelfJobProgressRatio(recentJob);
+                  return (
+                    <div
+                      key={`recent-shelf-job-${recentJob.job_id}`}
+                      className={`rounded-xl border p-3 transition-colors ${isSelected ? "border-cyan-300/40 bg-cyan-500/10 ring-1 ring-cyan-400/20" : "border-white/10 bg-black/20 hover:border-white/20 hover:bg-black/30"}`}
+                    >
+                      <div className="grid gap-3 sm:grid-cols-[112px_1fr]">
+                        <div className="overflow-hidden rounded-lg border border-white/10 bg-slate-950/60">
+                          {recentJobPreview ? (
+                            // eslint-disable-next-line @next/next/no-img-element
+                            <img src={recentJobPreview} alt={`Preview ${recentJob.job_id}`} className="h-24 w-full object-cover sm:h-28" />
+                          ) : (
+                            <div className="flex h-24 items-center justify-center px-2 text-center text-[11px] text-slate-500 sm:h-28">
+                              Sin miniatura
+                            </div>
+                          )}
+                        </div>
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-start justify-between gap-2">
+                            <div className="min-w-0">
+                              <p className="truncate font-mono text-sm text-slate-100" title={recentJob.job_id}>{recentJob.job_id}</p>
+                              <p className="mt-0.5 text-[11px] text-slate-400">{shelfRecentJobTypeLabel(recentJob)} · {recentJob.subcategoria ?? "Sin subcategoría"}</p>
+                            </div>
+                            <div className="flex shrink-0 flex-wrap justify-end gap-1">
+                              {statusBadge(String(recentJob.status ?? "unknown"))}
+                              {isSelected ? <Badge variant="default" className="text-[10px]">Activo</Badge> : null}
+                            </div>
                           </div>
-                          <div>
-                            <div className="flex flex-wrap items-start justify-between gap-2">
-                              <div>
-                                <p className="font-mono text-sm text-slate-100">{recentJob.job_id}</p>
-                                <p className="mt-1 text-xs text-slate-400">{shelfRecentJobTypeLabel(recentJob)} · {recentJob.subcategoria ?? "Sin subcategoría"}</p>
-                              </div>
-                              <div className="flex flex-wrap gap-2">
-                                {statusBadge(String(recentJob.status ?? "unknown"))}
-                                {(recentTrace.retry_count ?? 0) > 0 ? <Badge variant="secondary">Reejecución #{recentTrace.retry_count}</Badge> : null}
-                                {isSelected ? <Badge variant="outline">Cargado</Badge> : null}
-                              </div>
+                          <div className="mt-2">
+                            <div className="flex justify-between text-[10px] text-slate-500">
+                              <span>{recentJob.processed_images ?? 0}/{recentJob.total_images ?? 0} img</span>
+                              {(recentJob.failed_images ?? 0) > 0 ? <span className="text-rose-300">{recentJob.failed_images} fallidas</span> : null}
                             </div>
-                            <div className="mt-3 grid gap-2 text-xs text-slate-300 md:grid-cols-2">
-                              <p><span className="text-slate-400">PDV:</span> {recentJob.id_pdv ?? "-"}</p>
-                              <p><span className="text-slate-400">Actualizado:</span> {formatDateTime(recentJob.updated_at)}</p>
-                              <p><span className="text-slate-400">Imágenes:</span> {recentJob.processed_images}/{recentJob.total_images}</p>
-                              <p><span className="text-slate-400">Fallidas:</span> {recentJob.failed_images}</p>
-                              {recentTrace.source_job_id ? <p className="md:col-span-2"><span className="text-slate-400">Derivado de:</span> <span className="font-mono">{recentTrace.source_job_id}</span></p> : null}
+                            <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-white/10">
+                              <div className="h-full rounded-full bg-cyan-500/70" style={{ width: `${Math.round(progress * 100)}%` }} />
                             </div>
-                            <div className="mt-3 flex flex-wrap gap-2">
-                              <Button size="sm" onClick={() => loadShelfJob(recentJob.job_id, "results")}>
-                                Abrir resultados
-                              </Button>
-                              <Button size="sm" variant="outline" onClick={() => loadShelfJob(recentJob.job_id, "jobs")}>
-                                Solo cargar job
-                              </Button>
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                onClick={() => rerunShelfJobMutation.mutate(recentJob.job_id)}
-                                disabled={rerunShelfJobMutation.isPending}
-                              >
-                                Reejecutar
-                              </Button>
-                            </div>
+                          </div>
+                          <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-slate-400">
+                            <span>PDV: {recentJob.id_pdv ?? "—"}</span>
+                            <span>{formatDateTime(recentJob.updated_at)}</span>
+                            {(recentTrace.retry_count ?? 0) > 0 ? <span>Reintento #{recentTrace.retry_count}</span> : null}
+                          </div>
+                          {recentTrace.source_job_id ? (
+                            <p className="mt-1 truncate text-[10px] text-slate-500" title={recentTrace.source_job_id}>
+                              Derivado de {recentTrace.source_job_id}
+                            </p>
+                          ) : null}
+                          <div className="mt-3 flex flex-wrap gap-1.5">
+                            <Button size="sm" onClick={() => loadShelfJob(recentJob.job_id, "results")}>
+                              Resultados
+                            </Button>
+                            <Button size="sm" variant="outline" onClick={() => loadShelfJob(recentJob.job_id, "jobs")}>
+                              Cargar
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              onClick={() => rerunShelfJobMutation.mutate(recentJob.job_id)}
+                              disabled={rerunShelfJobMutation.isPending}
+                            >
+                              Reejecutar
+                            </Button>
                           </div>
                         </div>
                       </div>
-                    );
-                  })}
-                </div>
-              ) : (
-                <p className="mt-3 text-sm text-slate-400">No encontramos jobs recientes de Shelf con esos filtros.</p>
-              )}
-            </div>
-          </CardContent>
-        </Card>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="mt-4 flex min-h-[120px] flex-col items-center justify-center rounded-xl border border-dashed border-white/15 bg-black/20 p-6 text-center">
+                <p className="text-sm text-slate-300">No hay jobs con estos filtros</p>
+                <p className="mt-1 text-xs text-slate-500">Crea un job nuevo o cambia el filtro de tipo</p>
+              </div>
+            )}
+          </div>
+        </div>
       ) : null}
 
       {tab === "results" ? (
@@ -3056,6 +4177,23 @@ export function AccountShelfPage({ account }: Props) {
               <div className="rounded-lg border border-white/10 bg-black/20 p-3"><p className="text-xs text-slate-400">module</p><p>{String((resultsQuery.data?.result_json as Record<string, unknown> | undefined)?.module ?? "-")}</p></div>
               <div className="rounded-lg border border-white/10 bg-black/20 p-3"><p className="text-xs text-slate-400">processing_mode</p><p>{processingMode}</p></div>
             </div>
+            {jobHardNegativeSummary.total > 0 || jobHardNegativeSummary.pairs.length ? (
+              <div className="rounded-lg border border-violet-300/25 bg-violet-500/5 p-3">
+                <p className="text-sm font-semibold text-violet-100">Memoria de confusión aplicada en este job</p>
+                <p className="mt-1 text-xs text-violet-50/80">
+                  Backend ajustó el ranking en {jobHardNegativeSummary.total} crop(s) usando hard negatives registrados.
+                </p>
+                {jobHardNegativeSummary.pairs.length ? (
+                  <div className="mt-2 flex flex-wrap gap-1">
+                    {jobHardNegativeSummary.pairs.map((pair) => (
+                      <Badge key={`job-hn-${pair.pair}`} variant="outline" className="border-violet-300/30 text-[10px] text-violet-50">
+                        {hardNegativePairLabel(pair)} ×{pair.count}
+                      </Badge>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
             {(jobQuery.data?.source_job_id || jobQuery.data?.rerun_of_job_id || typeof jobQuery.data?.retry_count === "number") ? (
               <div className="grid gap-3 md:grid-cols-4">
                 <div className="rounded-lg border border-white/10 bg-black/20 p-3"><p className="text-xs text-slate-400">source_job_id</p><p className="font-mono text-sm text-slate-100">{jobQuery.data?.source_job_id ?? "-"}</p></div>
@@ -3182,15 +4320,25 @@ export function AccountShelfPage({ account }: Props) {
               <div className="mt-3 flex flex-wrap gap-2">
                 {masterReportLinks((resultsQuery.data ?? {}) as Record<string, unknown>).length ? (
                   masterReportLinks((resultsQuery.data ?? {}) as Record<string, unknown>).map((link) => (
-                    <a
-                      key={`master-link-${link.label}`}
-                      href={link.href}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="rounded-md border border-white/15 bg-white/5 px-3 py-2 text-sm hover:bg-white/10"
-                    >
-                      {link.label}
-                    </a>
+                    <span key={`master-link-${link.label}`} className="inline-flex gap-1">
+                      <a
+                        href={link.href}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="rounded-md border border-white/15 bg-white/5 px-3 py-2 text-sm hover:bg-white/10"
+                      >
+                        {link.label}
+                      </a>
+                      {link.label.toLowerCase().includes("markdown") && (
+                        <button
+                          type="button"
+                          className="rounded-md border border-cyan-300/30 bg-cyan-500/10 px-2 py-2 text-xs text-cyan-200 hover:bg-cyan-500/20"
+                          onClick={() => openMdDialog(`Master Markdown — ${selectedJobId}`, link.href, `master_${selectedJobId}.md`)}
+                        >
+                          Ver
+                        </button>
+                      )}
+                    </span>
                   ))
                 ) : shelfJobFailed ? (
                   <p className="text-sm text-amber-300">El job falló antes de publicar reportes maestros.</p>
@@ -3557,7 +4705,26 @@ export function AccountShelfPage({ account }: Props) {
                     <Badge variant="outline">Resultados: {artifactHeroSummary.resultsCount}</Badge>
                     <Badge variant={artifactHeroSummary.fallbackCount ? "secondary" : "outline"}>Con fallback: {artifactHeroSummary.fallbackCount}</Badge>
                     <Badge variant={artifactHeroSummary.reviewCount ? "destructive" : "outline"}>Revisión: {artifactHeroSummary.reviewCount}</Badge>
+                    {artifactHeroSummary.hardNegativeSummary.total > 0 ? (
+                      <Badge variant="secondary" title="Crops donde backend aplicó penalización por hard negative">
+                        HN aplicados: {artifactHeroSummary.hardNegativeSummary.total}
+                      </Badge>
+                    ) : null}
+                    {artifactHeroSummary.cropsWithHardNegativePenalty > 0 ? (
+                      <Badge variant="outline" title="Crops con al menos un candidato penalizado en top_candidates">
+                        Ranking ajustado: {artifactHeroSummary.cropsWithHardNegativePenalty}
+                      </Badge>
+                    ) : null}
                   </div>
+                  {artifactHeroSummary.hardNegativeSummary.pairs.length ? (
+                    <div className="mt-2 flex flex-wrap gap-1">
+                      {artifactHeroSummary.hardNegativeSummary.pairs.map((pair) => (
+                        <Badge key={`img-hn-${pair.pair}`} variant="outline" className="text-[10px]">
+                          {hardNegativePairLabel(pair)} ×{pair.count}
+                        </Badge>
+                      ))}
+                    </div>
+                  ) : null}
                 </div>
                 <div className="mt-4 grid gap-4 xl:grid-cols-[1.35fr,0.65fr]">
                   <div className="rounded-xl border border-white/10 bg-black/20 p-3">
@@ -3646,6 +4813,7 @@ export function AccountShelfPage({ account }: Props) {
                     <TableHead>Revisión</TableHead>
                     <TableHead>Fallback emb.</TableHead>
                     <TableHead>Orientación</TableHead>
+                    <TableHead title="Penalización por hard negative aplicada en rerank">HN</TableHead>
                     <TableHead>Top candidato</TableHead>
                   </TableRow>
                 </TableHeader>
@@ -3706,6 +4874,17 @@ export function AccountShelfPage({ account }: Props) {
                           return <Badge variant={mismatch ? "secondary" : "outline"}>{observed}</Badge>;
                         })()}
                       </TableCell>
+                      <TableCell className="max-w-28 whitespace-nowrap">
+                        {(() => {
+                          const hn = cropHardNegativeTableLabel(row);
+                          if (hn.short === "-") return <span className="text-slate-500">-</span>;
+                          return (
+                            <Badge variant="secondary" className="font-mono text-[10px]" title={hn.title}>
+                              {hn.short}
+                            </Badge>
+                          );
+                        })()}
+                      </TableCell>
                       <TableCell className="max-w-60 truncate">
                         {(() => {
                           const top = resultTopCandidates(row)[0];
@@ -3716,14 +4895,14 @@ export function AccountShelfPage({ account }: Props) {
                   );})}
                   {!shelfResults.length ? (
                     <TableRow>
-                      <TableCell colSpan={13}>
+                      <TableCell colSpan={14}>
                         {shelfJobFailed ? "El job falló antes de generar resultados." : "Sin resultados todavía."}
                       </TableCell>
                     </TableRow>
                   ) : null}
                   {shelfResults.length && !filteredShelfResultEntries.length ? (
                     <TableRow>
-                      <TableCell colSpan={13}>Ningún resultado coincide con los filtros actuales.</TableCell>
+                      <TableCell colSpan={14}>Ningún resultado coincide con los filtros actuales.</TableCell>
                     </TableRow>
                   ) : null}
                 </TableBody>
@@ -3986,7 +5165,7 @@ export function AccountShelfPage({ account }: Props) {
                     return (
                       <div
                         key={`result-card-${idx}`}
-                        className={`rounded-lg border p-3 transition-colors ${selectedForTraining ? "border-emerald-300/40 bg-emerald-500/10 ring-1 ring-emerald-400/20" : "border-white/10 bg-slate-950/40"}`}
+                        className={`min-w-0 rounded-lg border p-3 transition-colors ${selectedForTraining ? "border-emerald-300/40 bg-emerald-500/10 ring-1 ring-emerald-400/20" : "border-white/10 bg-slate-950/40"}`}
                         onClick={(event) => {
                           if (!entry.selectKey) return;
                           if ((event.target as HTMLElement).closest("button, a, input, textarea, summary, details")) return;
@@ -4111,7 +5290,33 @@ export function AccountShelfPage({ account }: Props) {
                           {matchedAgainstActiveIndex === true ? <Badge variant="outline">Contra índice activo</Badge> : null}
                           {alreadyPromoted ? <Badge variant="secondary">Ya promovido a dataset</Badge> : null}
                           {segmentationMeta.requested || segmentationMeta.applied ? <Badge variant={segmentationBadge.variant}>{segmentationBadge.label}</Badge> : null}
+                          {cropHasHardNegativePenalty(row) ? (
+                            <Badge variant="secondary" title="Al menos un candidato recibió penalización por hard negative en esta corrida">
+                              Ranking ajustado ({cropHardNegativePenalizedCount(row)})
+                            </Badge>
+                          ) : null}
                         </div>
+
+                        {cropHasHardNegativePenalty(row) ? (
+                          <div className="mt-3 rounded-lg border border-violet-300/25 bg-violet-500/5 p-3">
+                            <p className="text-xs font-medium text-violet-100">Se aplicó memoria de confusión en este crop</p>
+                            <div className="mt-2 space-y-1">
+                              {resultTopCandidates(row)
+                                .filter((candidate) => hardNegativeAppliedToCandidate(candidate))
+                                .map((candidate, hnIdx) => {
+                                  const code = candidateSkuCode(candidate) || `penalized_${hnIdx + 1}`;
+                                  const anchors = getHardNegativeAnchors(candidate);
+                                  return (
+                                    <p key={`crop-hn-${idx}-${code}`} className="text-[11px] leading-snug text-violet-50/90">
+                                      <span className="font-mono">{code}</span>
+                                      {" "}penalizado −{getHardNegativePenaltyApplied(candidate).toFixed(3)}
+                                      {anchors.length ? ` · ancla: ${anchors.join(", ")}` : ""}
+                                    </p>
+                                  );
+                                })}
+                            </div>
+                          </div>
+                        ) : null}
 
                         {(pendingReasonLabel || trainingSupportLabel || rerunOutcome || alreadyPromoted) ? (
                           <details className="mt-3 rounded-lg border border-sky-300/20 bg-sky-500/5 p-3">
@@ -4146,32 +5351,23 @@ export function AccountShelfPage({ account }: Props) {
                           </details>
                         ) : null}
 
-                        <details className="mt-3 rounded-lg border border-white/10 bg-black/20 p-3">
-                          <summary className="cursor-pointer text-sm font-medium text-slate-100">
-                            Top candidatos {candidates.length ? <span className="text-[11px] font-normal text-slate-400">({Math.min(candidates.length, 3)})</span> : null}
+                        <details className="mt-3 min-w-0 rounded-lg border border-amber-300/25 bg-amber-500/5 p-3" open>
+                          <summary className="cursor-pointer text-sm font-medium leading-snug text-slate-100">
+                            Candidatos similares {candidates.length ? <span className="text-[11px] font-normal text-slate-400">({Math.min(candidates.length, 5)})</span> : null}
                           </summary>
-                          <div className="mt-2 space-y-2">
-                            {candidates.length ? (
-                              candidates.slice(0, 3).map((candidate, candidateIdx) => {
-                                const candidateLabel = firstNonEmptyString(candidate.sku_id, candidate.sku_code, candidate.sku_name) || `candidate_${candidateIdx + 1}`;
-                                const candidateScore = typeof candidate.score === "number" ? candidate.score : null;
-                                return (
-                                  <button
-                                    key={`candidate-${idx}-${candidateIdx}`}
-                                    type="button"
-                                    onClick={() => setResultSkuOverrides((prev) => ({ ...prev, [resultKey]: candidateLabel }))}
-                                    className={`w-full rounded-md border bg-black/20 p-2 text-left ${selectedSkuForRow === candidateLabel ? "border-cyan-300/40" : "border-white/10"}`}
-                                  >
-                                    <div className="flex items-center justify-between gap-2">
-                                      <p className="text-xs text-slate-100">{candidateLabel}</p>
-                                      <Badge variant={confidenceTone(candidateScore)}>{candidateScore !== null ? candidateScore.toFixed(3) : "-"}</Badge>
-                                    </div>
-                                  </button>
-                                );
-                              })
-                            ) : (
-                              <p className="text-xs text-slate-500">Sin top_candidates disponibles.</p>
-                            )}
+                          <div className="mt-2 min-w-0">
+                            <SimilarCandidatesPanel
+                              candidates={candidates}
+                              anchorSku={currentResultSkuValue(resultKey, selectedSkuForRow)}
+                              selectedSku={selectedSkuForRow}
+                              onSelectCandidate={(code) => setResultSkuOverrides((prev) => ({ ...prev, [resultKey]: code }))}
+                              onMarkConfusion={(anchor, negative) => markSkuConfusionMutation.mutate({ anchorSku: anchor, negativeSku: negative })}
+                              onMarkAllRemainingConfusions={(anchor, negatives) => markAllSkuConfusionsMutation.mutate({ anchorSku: anchor, negativeSkus: negatives })}
+                              isMarking={markSkuConfusionMutation.isPending || markAllSkuConfusionsMutation.isPending}
+                              isMarkingAll={markAllSkuConfusionsMutation.isPending}
+                              savedConfusionKeys={savedSkuConfusionKeys}
+                              maxItems={5}
+                            />
                           </div>
                         </details>
 
@@ -4214,6 +5410,34 @@ export function AccountShelfPage({ account }: Props) {
                               onBlur={(e) => setResultSkuOverrides((prev) => ({ ...prev, [resultKey]: e.target.value }))}
                               placeholder="Buscar o escribir sku_id"
                             />
+                            {(() => {
+                              const anchorSku = currentResultSkuValue(resultKey, selectedSkuForRow);
+                              const pendingConfusions = pendingSkuConfusions(candidates, anchorSku, savedSkuConfusionKeys, 5);
+                              if (!anchorSku || !pendingConfusions.length) return null;
+                              return (
+                                <div className="mt-3 rounded-md border border-amber-300/35 bg-amber-500/10 p-2.5">
+                                  <p className="text-[11px] leading-relaxed text-amber-50">
+                                    {pendingConfusions.length === 1
+                                      ? "Hay 1 candidato similar que aún no está marcado como incorrecto."
+                                      : `Hay ${pendingConfusions.length} candidatos similares que aún no están marcados como incorrectos.`}
+                                  </p>
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    className="mt-2 h-9 w-full border-amber-300/50 text-xs font-medium text-amber-50 hover:bg-amber-500/20"
+                                    disabled={markSkuConfusionMutation.isPending || markAllSkuConfusionsMutation.isPending}
+                                    title="No reasigna la imagen. Guarda que estos SKUs se parecen al correcto pero no lo son."
+                                    onClick={() => markAllSkuConfusionsMutation.mutate({ anchorSku, negativeSkus: pendingConfusions })}
+                                  >
+                                    {markAllSkuConfusionsMutation.isPending
+                                      ? "Guardando confusiones…"
+                                      : pendingConfusions.length === 1
+                                        ? "Marcar restante como incorrecto"
+                                        : `Marcar ${pendingConfusions.length} restantes como incorrectos`}
+                                  </Button>
+                                </div>
+                              );
+                            })()}
                           </div>
                           <div className="flex flex-wrap gap-2">
                             <Button
@@ -4503,15 +5727,25 @@ export function AccountShelfPage({ account }: Props) {
                         <div className="flex flex-wrap gap-2">
                           {artifactReportLinks(artifactsQuery.data as Record<string, unknown>).length ? (
                             artifactReportLinks(artifactsQuery.data as Record<string, unknown>).map((link) => (
-                              <a
-                                key={`artifact-link-${link.label}`}
-                                href={link.href}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="rounded-md border border-white/15 bg-white/5 px-3 py-2 text-sm hover:bg-white/10"
-                              >
-                                {link.label}
-                              </a>
+                              <span key={`artifact-link-${link.label}`} className="inline-flex gap-1">
+                                <a
+                                  href={link.href}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="rounded-md border border-white/15 bg-white/5 px-3 py-2 text-sm hover:bg-white/10"
+                                >
+                                  {link.label}
+                                </a>
+                                {link.label.toLowerCase().includes("markdown") && (
+                                  <button
+                                    type="button"
+                                    className="rounded-md border border-cyan-300/30 bg-cyan-500/10 px-2 py-2 text-xs text-cyan-200 hover:bg-cyan-500/20"
+                                    onClick={() => openMdDialog(`Reporte imagen #${selectedArtifactsImageId}`, link.href, `image_${selectedArtifactsImageId}.md`)}
+                                  >
+                                    Ver
+                                  </button>
+                                )}
+                              </span>
                             ))
                           ) : (
                             <p className="text-sm text-slate-400">No hay reportes HTML/Markdown/JSON publicados para esta imagen todavía.</p>
@@ -4903,15 +6137,19 @@ export function AccountShelfPage({ account }: Props) {
                         </div>
                       ) : null}
 
-                      <div className="grid gap-4 md:grid-cols-2">
-                        <div className="rounded-lg border border-white/10 bg-slate-950/40 p-3">
-                          <p className="mb-2 text-sm font-semibold">Resultados shelf</p>
+                      <ShelfAuditSummary data={artifactsQuery.data as Record<string, unknown>} />
+                      <ShelfConfigSnapshot data={artifactsQuery.data as Record<string, unknown>} />
+
+                      {selectedArtifactsResults.map((row, idx) => (
+                        <ShelfCropAuditDetail key={`crop-audit-${idx}`} result={row as unknown as Record<string, unknown>} defaultOpen={idx === 0} />
+                      ))}
+
+                      <details className="rounded-lg border border-white/10 bg-slate-950/40 p-3">
+                        <summary className="cursor-pointer text-xs text-slate-400">JSON crudo (debug)</summary>
+                        <div className="mt-2 grid gap-4 md:grid-cols-2">
                           <pre className="max-h-72 overflow-auto text-xs">
                             {JSON.stringify(selectedArtifactsResults.length ? selectedArtifactsResults : artifactsQuery.data, null, 2)}
                           </pre>
-                        </div>
-                        <div className="rounded-lg border border-white/10 bg-slate-950/40 p-3">
-                          <p className="mb-2 text-sm font-semibold">Detecciones y análisis</p>
                           <pre className="max-h-72 overflow-auto text-xs">
                             {JSON.stringify(
                               {
@@ -4927,7 +6165,7 @@ export function AccountShelfPage({ account }: Props) {
                             )}
                           </pre>
                         </div>
-                      </div>
+                      </details>
                     </div>
                   ) : artifactsQuery.error instanceof HttpError ? (
                     <p className="mt-3 text-sm text-amber-300">No se pudieron cargar los artifacts: {artifactsQuery.error.detail}</p>
@@ -4938,28 +6176,10 @@ export function AccountShelfPage({ account }: Props) {
               ) : null}
             </div>
 
-            <div className="grid gap-4 md:grid-cols-2">
-              <div>
-                <p className="mb-2 text-sm font-semibold">Eventos clave</p>
-                <div className="max-h-64 overflow-auto rounded border border-white/10 bg-black/20 p-2 text-xs">
-                  {(eventsQuery.data ?? []).map((ev) => (
-                    <div key={`ev-${ev.id}`} className="mb-1 border-b border-white/5 pb-1">
-                      <span className="font-mono">{ev.event_type}</span> | {ev.level} | {ev.message}
-                    </div>
-                  ))}
-                </div>
-              </div>
-              <div>
-                <p className="mb-2 text-sm font-semibold">Metricas</p>
-                <div className="max-h-64 overflow-auto rounded border border-white/10 bg-black/20 p-2 text-xs">
-                  {(metricsQuery.data?.metrics ?? []).map((m) => (
-                    <div key={`m-${m.id}`} className="mb-1 border-b border-white/5 pb-1">
-                      {m.step} | {m.duration_ms.toFixed(1)} ms
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
+            <ShelfEventsTimeline
+              events={(eventsQuery.data ?? []) as { id: number | string; event_type: string; level: string; message: string; created_at?: string }[]}
+              metrics={(metricsQuery.data?.metrics ?? []) as { id: number | string; step: string; duration_ms: number }[]}
+            />
           </CardContent>
         </Card>
       ) : null}
@@ -4991,65 +6211,144 @@ export function AccountShelfPage({ account }: Props) {
             </div>
 
             {skuWorkspaceTab === "pruebas" ? (
-            <div className="rounded-lg border border-cyan-300/20 bg-cyan-500/5 p-3">
-              <div className="flex flex-wrap items-center justify-between gap-2">
+            <>
+            <div className="rounded-xl border border-cyan-300/20 bg-gradient-to-br from-cyan-500/10 via-slate-950/60 to-slate-950/80 p-4">
+              <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
-                  <p className="text-sm font-semibold">Probar SKU</p>
-                  <p className="text-xs text-slate-300">Usa el helper oficial para lanzar una prueba puntual y luego revisar resultados, artifacts, events y metrics del job generado.</p>
+                  <p className="text-sm font-semibold text-slate-100">Pruebas · validación puntual de SKU</p>
+                  <p className="text-xs text-slate-300">Lanza un job de prueba con escena completa o evalúa un crop aislado. Elige el SKU desde el catálogo o escríbelo directamente.</p>
                 </div>
-                <Badge variant="outline">SKU prueba: {testSkuId || selectedSkuId || skuImageBrowserSkuId || "no seleccionado"}</Badge>
-              </div>
-              <div className="mt-3 grid gap-3 md:grid-cols-3">
-                <div>
-                  <Label>sku_id</Label>
-                  <Input value={testSkuId} onChange={(e) => setTestSkuId(e.target.value)} placeholder="KALIPTO_DESINF_1L" />
-                </div>
-                <div>
-                  <Label>id_pdv</Label>
-                  <Input value={testIdPdv} onChange={(e) => setTestIdPdv(e.target.value)} placeholder="PDV_TEST_001" />
-                </div>
-                <div>
-                  <Label>imagen local (ruta)</Label>
-                  <Input value={testImagePath} onChange={(e) => setTestImagePath(e.target.value)} placeholder="C:\\imagenes\\escena_prueba.jpg" />
+                <div className="flex flex-wrap gap-2">
+                  <Badge variant="outline">SKU: {testSkuId || activeSkuWorkspaceId || "no seleccionado"}</Badge>
+                  {lastSkuTestJob?.job_id ? <Badge variant="secondary">Último job: {lastSkuTestJob.job_id}</Badge> : null}
+                  {lastEvaluateCrop ? <Badge variant="outline">Última evaluación lista</Badge> : null}
+                  <Button variant="outline" size="sm" onClick={() => skusQuery.refetch()} disabled={skusQuery.isFetching}>Refrescar catálogo</Button>
                 </div>
               </div>
-              <div className="mt-3 grid gap-3 md:grid-cols-[1fr_auto]">
-                <div className="space-y-2">
-                  <Input type="file" accept="image/*" onChange={(e) => setTestFiles(Array.from(e.target.files ?? []))} />
-                  <p className="text-xs text-slate-400">Si eliges archivo desde explorador, el frontend hace upload y usa `image_file_id` automáticamente.</p>
-                </div>
-                <Button onClick={() => createSkuTestJobMutation.mutate()} disabled={createSkuTestJobMutation.isPending}>
-                  Probar SKU
-                </Button>
+            </div>
+
+            <div className="rounded-xl border border-white/10 bg-black/20 p-4">
+              <p className="text-sm font-semibold text-slate-100">Buscar SKU para probar</p>
+              <div className="mt-3 grid gap-3 xl:grid-cols-[1.5fr_auto_auto]">
+                <Input value={skuCatalogSearch} onChange={(e) => setSkuCatalogSearch(e.target.value)} placeholder="Buscar SKU, nombre, marca, categoría..." />
+                <select className="h-10 rounded-md border border-white/10 bg-slate-900 px-3 text-sm" value={String(skuCatalogPageSize)} onChange={(e) => setSkuCatalogPageSize(Number(e.target.value))}>
+                  <option value="12">12 / página</option>
+                  <option value="24">24 / página</option>
+                  <option value="48">48 / página</option>
+                </select>
+                <div className="flex items-center justify-center rounded-md border border-white/10 bg-slate-950/40 px-3 text-sm text-slate-300">Pág. {skuCatalogPage}/{catalogTotalPages}</div>
               </div>
-            {lastSkuTestJob ? (
-              <div className="mt-3 rounded-lg border border-white/10 bg-black/20 p-3 text-sm">
-                  <p><span className="text-slate-400">job_id:</span> <span className="font-mono">{lastSkuTestJob.job_id}</span></p>
-                  <p><span className="text-slate-400">expected_sku_id:</span> {lastSkuTestJob.expected_sku_id ?? "-"}</p>
-                  <p><span className="text-slate-400">test_mode:</span> {lastSkuTestJob.test_mode ?? "-"}</p>
-                  {(lastSkuTestJob.recommended_next_steps ?? []).length ? (
-                    <div className="mt-2">
-                      <p className="text-slate-400">siguientes pasos sugeridos:</p>
-                      <div className="mt-1 space-y-1 text-xs text-slate-300">
-                        {(lastSkuTestJob.recommended_next_steps ?? []).map((step, idx) => <p key={`next-step-${idx}`}>{step}</p>)}
+              <div className="mt-3 flex flex-wrap gap-2">
+                <select className="h-9 rounded-md border border-white/10 bg-slate-900 px-2 text-xs" value={skuCatalogCategoryFilter} onChange={(e) => setSkuCatalogCategoryFilter(e.target.value)}>
+                  <option value="">Todas las categorías</option>
+                  {skuCatalogOptions.categories.map((value) => <option key={`pr-cat-${value}`} value={value}>{value}</option>)}
+                </select>
+                <select className="h-9 rounded-md border border-white/10 bg-slate-900 px-2 text-xs" value={skuCatalogBrandFilter} onChange={(e) => setSkuCatalogBrandFilter(e.target.value)}>
+                  <option value="">Todas las marcas</option>
+                  {skuCatalogOptions.brands.map((value) => <option key={`pr-brand-${value}`} value={value}>{value}</option>)}
+                </select>
+                <label className="ml-auto flex items-center gap-2 rounded-md border border-white/10 bg-slate-950/40 px-3 text-xs text-slate-200">
+                  <Switch checked={skuCatalogOnlyActive} onCheckedChange={setSkuCatalogOnlyActive} />
+                  Solo activos
+                </label>
+              </div>
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400">
+                <span>{paginatedCatalogSkus.length} de {filteredCatalogSkus.length} SKUs</span>
+                <div className="flex gap-2">
+                  <Button size="sm" variant="outline" onClick={() => setSkuCatalogPage((p) => Math.max(1, p - 1))} disabled={skuCatalogPage <= 1}>Anterior</Button>
+                  <Button size="sm" variant="outline" onClick={() => setSkuCatalogPage((p) => Math.min(catalogTotalPages, p + 1))} disabled={skuCatalogPage >= catalogTotalPages}>Siguiente</Button>
+                </div>
+              </div>
+            </div>
+
+            <div className="grid gap-4 xl:grid-cols-[minmax(280px,340px)_minmax(0,1fr)]">
+              <div className="max-h-[72vh] overflow-y-auto rounded-xl border border-white/10 bg-slate-950/50 p-2">
+                <p className="sticky top-0 z-10 border-b border-white/10 bg-slate-950/95 px-2 py-2 text-xs font-semibold uppercase tracking-wide text-slate-400">Catálogo · elegir SKU</p>
+                <div className="space-y-2 p-1">
+                  {paginatedCatalogSkus.map((sku) => {
+                    const code = getSkuCodeValue(sku);
+                    const selected = code === testSkuId || code === activeSkuWorkspaceId;
+                    const coverage = resolveSkuDatasetCoverage(sku);
+                    return (
+                      <button
+                        key={`pr-sku-${code || sku.id}`}
+                        type="button"
+                        onClick={() => code && selectCatalogSku(code)}
+                        className={`w-full rounded-lg border p-3 text-left transition ${selected ? "border-cyan-300/40 bg-cyan-500/10 ring-1 ring-cyan-400/20" : "border-white/10 bg-black/20 hover:bg-black/30"}`}
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <p className="font-mono text-sm text-slate-100">{code || "—"}</p>
+                          <Badge variant={coverage.images > 0 ? "default" : "secondary"}>{coverage.images} img</Badge>
+                        </div>
+                        <p className="mt-1 line-clamp-2 text-xs text-slate-300">{getSkuNameValue(sku) || "Sin nombre"}</p>
+                      </button>
+                    );
+                  })}
+                  {!paginatedCatalogSkus.length ? <p className="px-2 py-6 text-center text-sm text-slate-400">Ningún SKU coincide con los filtros.</p> : null}
+                </div>
+              </div>
+
+              <div className="space-y-4">
+                <div className="rounded-xl border border-cyan-300/20 bg-cyan-500/5 p-4">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <p className="text-sm font-semibold text-slate-100">Job de prueba SKU</p>
+                      <p className="text-xs text-slate-300">Crea un job completo y revisa resultados, artifacts, events y metrics.</p>
+                    </div>
+                    <Badge variant="outline">POST /shelf/sku-test</Badge>
+                  </div>
+                  <div className="mt-3 grid gap-3 md:grid-cols-3">
+                    <div>
+                      <Label>sku_id</Label>
+                      <Input value={testSkuId} onChange={(e) => setTestSkuId(e.target.value)} placeholder="KALIPTO_DESINF_1L" />
+                    </div>
+                    <div>
+                      <Label>id_pdv</Label>
+                      <Input value={testIdPdv} onChange={(e) => setTestIdPdv(e.target.value)} placeholder="PDV_TEST_001" />
+                    </div>
+                    <div>
+                      <Label>imagen local (ruta)</Label>
+                      <Input value={testImagePath} onChange={(e) => setTestImagePath(e.target.value)} placeholder="C:\\imagenes\\escena_prueba.jpg" />
+                    </div>
+                  </div>
+                  <div className="mt-3 grid gap-3 md:grid-cols-[1fr_auto]">
+                    <div className="space-y-2">
+                      <Input type="file" accept="image/*" onChange={(e) => setTestFiles(Array.from(e.target.files ?? []))} />
+                      <p className="text-xs text-slate-400">Si eliges archivo desde explorador, el frontend hace upload y usa `image_file_id` automáticamente.</p>
+                    </div>
+                    <Button onClick={() => createSkuTestJobMutation.mutate()} disabled={createSkuTestJobMutation.isPending}>
+                      Probar SKU
+                    </Button>
+                  </div>
+                  {lastSkuTestJob ? (
+                    <div className="mt-4 rounded-lg border border-white/10 bg-black/20 p-3 text-sm">
+                      <p><span className="text-slate-400">job_id:</span> <span className="font-mono">{lastSkuTestJob.job_id}</span></p>
+                      <p><span className="text-slate-400">expected_sku_id:</span> {lastSkuTestJob.expected_sku_id ?? "-"}</p>
+                      <p><span className="text-slate-400">test_mode:</span> {lastSkuTestJob.test_mode ?? "-"}</p>
+                      {(lastSkuTestJob.recommended_next_steps ?? []).length ? (
+                        <div className="mt-2">
+                          <p className="text-slate-400">siguientes pasos sugeridos:</p>
+                          <div className="mt-1 space-y-1 text-xs text-slate-300">
+                            {(lastSkuTestJob.recommended_next_steps ?? []).map((step, idx) => <p key={`next-step-${idx}`}>{step}</p>)}
+                          </div>
+                        </div>
+                      ) : null}
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        <Button size="sm" variant="outline" onClick={() => setTab("results")}>Ir a resultados</Button>
+                        <Button size="sm" variant="outline" onClick={() => { jobQuery.refetch(); resultsQuery.refetch(); eventsQuery.refetch(); metricsQuery.refetch(); }}>Actualizar job</Button>
                       </div>
                     </div>
                   ) : null}
-                  <div className="mt-3 flex flex-wrap gap-2">
-                    <Button size="sm" variant="outline" onClick={() => setTab("results")}>Ir a resultados</Button>
-                    <Button size="sm" variant="outline" onClick={() => { jobQuery.refetch(); resultsQuery.refetch(); eventsQuery.refetch(); metricsQuery.refetch(); }}>Actualizar job</Button>
-                  </div>
                 </div>
-              ) : null}
 
-              <div className="mt-4 rounded-lg border border-emerald-300/20 bg-emerald-500/5 p-3">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div>
-                    <p className="text-sm font-semibold">Evaluar crop directo</p>
-                    <p className="text-xs text-slate-300">Úsalo cuando ya tienes la imagen recortada y solo quieres saber qué SKU parece ser, sin crear un job completo.</p>
+                <div className="rounded-xl border border-emerald-300/20 bg-emerald-500/5 p-4">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <p className="text-sm font-semibold text-slate-100">Evaluar crop directo</p>
+                      <p className="text-xs text-slate-300">Imagen recortada → candidatos SKU sin crear un job completo.</p>
+                    </div>
+                    <Badge variant="outline">POST /shelf/evaluate-crop</Badge>
                   </div>
-                  <Badge variant="outline">POST /shelf/evaluate-crop</Badge>
-                </div>
                 <div className="mt-3 grid gap-3 md:grid-cols-3">
                   <div>
                     <Label>image_path</Label>
@@ -5203,101 +6502,74 @@ export function AccountShelfPage({ account }: Props) {
                         })()}
                         {(lastEvaluateCrop.top_candidates ?? []).length ? (
                           <div className="rounded-lg border border-white/10 bg-slate-950/40 p-3">
-                            <p className="mb-2 text-sm font-semibold">Top candidatos</p>
-                            <div className="space-y-2">
-                              {(lastEvaluateCrop.top_candidates ?? []).slice(0, 5).map((candidate, idx) => {
-                                const code = firstNonEmptyString(candidate.sku_id, candidate.nombre, `candidate_${idx + 1}`);
-                                return (
-                                  <button
-                                    key={`eval-candidate-${idx}-${code}`}
-                                    type="button"
-                                    onClick={() => {
-                                      setTestSkuId(code);
-                                      setSelectedSkuId(code);
-                                      setCropActionSkuId(code);
-                                      setCropActionSkuSearch(code);
-                                    }}
-                                    className="w-full rounded-md border border-white/10 bg-black/20 p-2 text-left hover:bg-black/30"
-                                  >
-                                    <div className="flex items-center justify-between gap-2">
-                                      <p className="text-sm text-slate-100">{code}</p>
-                                      <Badge variant={confidenceTone(candidate.score)}>{typeof candidate.score === "number" ? candidate.score.toFixed(3) : "-"}</Badge>
-                                    </div>
-                                    <p className="mt-1 text-xs text-slate-400">{firstNonEmptyString(candidate.nombre, candidate.marca, candidate.categoria) || "Sin descripción"}</p>
-                                  </button>
-                                );
-                              })}
-                            </div>
+                            <p className="mb-2 text-sm font-semibold">Candidatos similares</p>
+                            <SimilarCandidatesPanel
+                              candidates={(lastEvaluateCrop.top_candidates ?? []) as Record<string, unknown>[]}
+                              anchorSku={testSkuId.trim() || selectedSkuId.trim() || skuImageBrowserSkuId.trim()}
+                              selectedSku={testSkuId.trim()}
+                              onSelectCandidate={(code) => {
+                                setTestSkuId(code);
+                                setSelectedSkuId(code);
+                                setCropActionSkuId(code);
+                                setCropActionSkuSearch(code);
+                              }}
+                              onMarkConfusion={(anchor, negative) => markSkuConfusionMutation.mutate({ anchorSku: anchor, negativeSku: negative })}
+                              onMarkAllRemainingConfusions={(anchor, negatives) => markAllSkuConfusionsMutation.mutate({ anchorSku: anchor, negativeSkus: negatives })}
+                              isMarking={markSkuConfusionMutation.isPending || markAllSkuConfusionsMutation.isPending}
+                              isMarkingAll={markAllSkuConfusionsMutation.isPending}
+                              savedConfusionKeys={savedSkuConfusionKeys}
+                              maxItems={5}
+                            />
                           </div>
                         ) : null}
                         {lastEvaluateCrop.embedding_diagnostics ? (
-                          <div className="rounded-lg border border-white/10 bg-slate-950/40 p-3">
-                            <p className="text-sm font-semibold">Diagnóstico técnico</p>
+                          <details className="rounded-lg border border-white/10 bg-slate-950/40 p-3">
+                            <summary className="cursor-pointer text-sm font-semibold text-slate-100">Diagnóstico técnico (embeddings)</summary>
                             <p className="mt-2 text-xs text-slate-300">{diagnosticsHeadline(lastEvaluateCrop.embedding_diagnostics)}</p>
-                          </div>
+                          </details>
                         ) : null}
                       </div>
                     </div>
                   </div>
                 ) : null}
+                </div>
               </div>
             </div>
+            </>
             ) : null}
 
             {skuWorkspaceTab === "catalogo" ? (
             <>
-            <div className="rounded-xl border border-cyan-300/20 bg-cyan-500/5 p-4">
-              <div className="grid gap-3 md:grid-cols-3">
-                <div className="rounded-lg border border-white/10 bg-black/20 p-3">
-                  <p className="text-xs text-slate-400">Catálogo SKU</p>
-                  <p className="mt-1 text-sm text-slate-100">Aquí eliges, revisas y reutilizas SKUs que ya existen. También puedes cargar uno al formulario para tomarlo como base.</p>
-                </div>
-                <div className="rounded-lg border border-white/10 bg-black/20 p-3">
-                  <p className="text-xs text-slate-400">Imagen directa al SKU</p>
-                  <p className="mt-1 text-sm text-slate-100">Usa esta carga cuando ya sabes a qué SKU pertenece la imagen y quieres meterla directo al dataset real.</p>
-                </div>
-                <div className="rounded-lg border border-white/10 bg-black/20 p-3">
-                  <p className="text-xs text-slate-400">Assets separados</p>
-                  <p className="mt-1 text-sm text-slate-100">La pestaña Assets es una biblioteca previa. Sirve para preparar y revisar imágenes antes de vincularlas a un SKU concreto.</p>
-                </div>
-              </div>
-            </div>
-
-            <div className="rounded-lg border border-white/10 bg-black/20 p-3">
-              <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="rounded-xl border border-cyan-300/20 bg-gradient-to-br from-cyan-500/10 via-slate-950/60 to-slate-950/80 p-4">
+              <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
-                  <p className="text-sm font-semibold">Explorar SKUs existentes</p>
-                  <p className="text-xs text-slate-300">Busca por SKU, nombre, marca, categoría, subcategoría o fabricante. También puedes revisar la ficha completa antes de usarlo.</p>
+                  <p className="text-sm font-semibold text-slate-100">Catálogo · explorar y reutilizar SKUs</p>
+                  <p className="text-xs text-slate-300">Busca en el catálogo, revisa la ficha completa y salta al dataset, cargas o pruebas sin perder contexto.</p>
                 </div>
                 <div className="flex flex-wrap gap-2">
                   <Badge variant="outline">Total BD: {skuCategoriesQuery.data ? skuCategoriesQuery.data.reduce((sum, c) => sum + c.count_active, 0) : (skusQuery.data ?? []).length}</Badge>
                   <Badge variant="outline">Cargados: {(skusQuery.data ?? []).length}</Badge>
-                  <Badge variant="outline">Visibles: {filteredSkusCatalog.length}</Badge>
+                  <Badge variant="outline">{datasetAccountTotals.skusWithImages} con imágenes</Badge>
+                  <Badge variant="outline">Visibles: {filteredCatalogSkus.length}</Badge>
+                  <Button variant="outline" size="sm" onClick={() => { skusQuery.refetch(); accountDatasetCoverageQuery.refetch(); }} disabled={skusQuery.isFetching}>Refrescar</Button>
                 </div>
               </div>
-              <div className="mt-3 grid gap-3 xl:grid-cols-[1.5fr_auto_auto_auto]">
-                <Input
-                  value={skuCatalogSearch}
-                  onChange={(e) => setSkuCatalogSearch(e.target.value)}
-                  placeholder="Buscar por SKU, nombre, marca, categoría, subcategoría o fabricante..."
-                />
-                <select
-                  className="h-10 rounded-md border border-white/10 bg-slate-900 px-3 text-sm"
-                  value={String(skuCatalogPageSize)}
-                  onChange={(e) => setSkuCatalogPageSize(Number(e.target.value))}
-                >
-                  <option value="12">12 por página</option>
-                  <option value="24">24 por página</option>
-                  <option value="48">48 por página</option>
+            </div>
+
+            <div className="rounded-xl border border-white/10 bg-black/20 p-4">
+              <p className="text-sm font-semibold text-slate-100">Buscar y filtrar</p>
+              <div className="mt-3 grid gap-3 xl:grid-cols-[1.5fr_auto_auto]">
+                <Input value={skuCatalogSearch} onChange={(e) => setSkuCatalogSearch(e.target.value)} placeholder="Buscar SKU, nombre, marca, categoría, fabricante..." />
+                <select className="h-10 rounded-md border border-white/10 bg-slate-900 px-3 text-sm" value={String(skuCatalogPageSize)} onChange={(e) => setSkuCatalogPageSize(Number(e.target.value))}>
+                  <option value="12">12 / página</option>
+                  <option value="24">24 / página</option>
+                  <option value="48">48 / página</option>
                 </select>
-                <div className="flex items-center justify-center rounded-md border border-white/10 bg-slate-950/40 px-3 text-sm text-slate-300">
-                  Página {skuCatalogPage} de {skuCatalogTotalPages}
-                </div>
-                <Button variant="outline" onClick={() => skusQuery.refetch()}>Refrescar catálogo</Button>
+                <div className="flex items-center justify-center rounded-md border border-white/10 bg-slate-950/40 px-3 text-sm text-slate-300">Pág. {skuCatalogPage}/{catalogTotalPages}</div>
               </div>
               <div className="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
                 <select className="h-10 rounded-md border border-white/10 bg-slate-900 px-3 text-sm" value={skuCatalogCategoryFilter} onChange={(e) => setSkuCatalogCategoryFilter(e.target.value)}>
-                  <option value="">Todas las categorías ({skuCategoriesQuery.data ? skuCategoriesQuery.data.reduce((s, c) => s + c.count_active, 0) : "..."})</option>
+                  <option value="">Todas las categorías</option>
                   {skuCatalogOptions.categories.map((value) => {
                     const catData = skuCategoriesQuery.data?.find((c) => c.categoria === value);
                     return <option key={`cat-${value}`} value={value}>{value}{catData ? ` (${catData.count_active})` : ""}</option>;
@@ -5307,17 +6579,17 @@ export function AccountShelfPage({ account }: Props) {
                   <option value="">Todas las subcategorías</option>
                   {skuCatalogOptions.subcategories.map((value) => <option key={`subcat-${value}`} value={value}>{value}</option>)}
                 </select>
-                <select className="h-10 rounded-md border border-white/10 bg-slate-900 px-3 text-sm" value={skuCatalogSegmentFilter} onChange={(e) => setSkuCatalogSegmentFilter(e.target.value)}>
-                  <option value="">Todos los segmentos</option>
-                  {skuCatalogOptions.segments.map((value) => <option key={`segment-${value}`} value={value}>{value}</option>)}
+                <select className="h-10 rounded-md border border-white/10 bg-slate-900 px-3 text-sm" value={skuCatalogBrandFilter} onChange={(e) => setSkuCatalogBrandFilter(e.target.value)}>
+                  <option value="">Todas las marcas</option>
+                  {skuCatalogOptions.brands.map((value) => <option key={`brand-${value}`} value={value}>{value}</option>)}
                 </select>
                 <select className="h-10 rounded-md border border-white/10 bg-slate-900 px-3 text-sm" value={skuCatalogManufacturerFilter} onChange={(e) => setSkuCatalogManufacturerFilter(e.target.value)}>
                   <option value="">Todos los fabricantes</option>
                   {skuCatalogOptions.manufacturers.map((value) => <option key={`manufacturer-${value}`} value={value}>{value}</option>)}
                 </select>
-                <select className="h-10 rounded-md border border-white/10 bg-slate-900 px-3 text-sm" value={skuCatalogBrandFilter} onChange={(e) => setSkuCatalogBrandFilter(e.target.value)}>
-                  <option value="">Todas las marcas</option>
-                  {skuCatalogOptions.brands.map((value) => <option key={`brand-${value}`} value={value}>{value}</option>)}
+                <select className="h-10 rounded-md border border-white/10 bg-slate-900 px-3 text-sm" value={skuCatalogSegmentFilter} onChange={(e) => setSkuCatalogSegmentFilter(e.target.value)}>
+                  <option value="">Todos los segmentos</option>
+                  {skuCatalogOptions.segments.map((value) => <option key={`segment-${value}`} value={value}>{value}</option>)}
                 </select>
                 <select className="h-10 rounded-md border border-white/10 bg-slate-900 px-3 text-sm" value={skuCatalogGroupFilter} onChange={(e) => setSkuCatalogGroupFilter(e.target.value)}>
                   <option value="">Todos los grupos</option>
@@ -5333,128 +6605,81 @@ export function AccountShelfPage({ account }: Props) {
                   Solo activos
                 </label>
               </div>
-              <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
-                <p className="text-xs text-slate-400">
-                  Mostrando {paginatedSkusCatalog.length} de {filteredSkusCatalog.length} SKUs filtrados.
-                </p>
-                <div className="flex flex-wrap gap-2">
-                  <Button size="sm" variant="outline" onClick={() => setSkuCatalogPage((page) => Math.max(1, page - 1))} disabled={skuCatalogPage <= 1}>
-                    Anterior
-                  </Button>
-                  <Button size="sm" variant="outline" onClick={() => setSkuCatalogPage((page) => Math.min(skuCatalogTotalPages, page + 1))} disabled={skuCatalogPage >= skuCatalogTotalPages}>
-                    Siguiente
-                  </Button>
+              <div className="mt-3 flex flex-wrap gap-2">
+                {([
+                  ["all", "Todos"],
+                  ["with_images", "Con imágenes"],
+                  ["without_images", "Sin imágenes"],
+                  ["indexable", "Indexables"],
+                ] as const).map(([key, label]) => (
+                  <Button key={`cat-cov-${key}`} size="sm" variant={datasetCoverageFilter === key ? "default" : "outline"} onClick={() => setDatasetCoverageFilter(key)}>{label}</Button>
+                ))}
+              </div>
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400">
+                <span>{paginatedCatalogSkus.length} de {filteredCatalogSkus.length} SKUs</span>
+                <div className="flex gap-2">
+                  <Button size="sm" variant="outline" onClick={() => setSkuCatalogPage((p) => Math.max(1, p - 1))} disabled={skuCatalogPage <= 1}>Anterior</Button>
+                  <Button size="sm" variant="outline" onClick={() => setSkuCatalogPage((p) => Math.min(catalogTotalPages, p + 1))} disabled={skuCatalogPage >= catalogTotalPages}>Siguiente</Button>
                 </div>
               </div>
-              <div className="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                {paginatedSkusCatalog.map((sku) => {
-                  const code = getSkuCodeValue(sku);
-                  const isActiveSku = code && code === (selectedSkuId || skuImageBrowserSkuId || testSkuId);
-                  return (
-                    <div key={`sku-catalog-card-${code || sku.id}`} className={`rounded-lg border p-3 ${isActiveSku ? "border-cyan-300/40 bg-cyan-500/10" : "border-white/10 bg-slate-950/40"}`}>
-                      <div className="flex items-center justify-between gap-2">
-                        <p className="font-mono text-sm text-slate-100">{code || "-"}</p>
-                        <Badge variant={isActiveSku ? "default" : "outline"}>{activeLabel((sku as Record<string, unknown>).is_active)}</Badge>
-                      </div>
-                      <p className="mt-2 text-sm text-slate-100">{getSkuNameValue(sku) || "Sin nombre"}</p>
-                      <div className="mt-2 flex flex-wrap gap-2 text-xs text-slate-300">
-                        {getSkuBrandValue(sku) ? <span>{getSkuBrandValue(sku)}</span> : null}
-                        {getSkuFamilyValue(sku) ? <span>{getSkuFamilyValue(sku)}</span> : null}
-                        {getSkuSubcategoryValue(sku) ? <span>{getSkuSubcategoryValue(sku)}</span> : null}
-                        {getSkuSegmentValue(sku) ? <span>{getSkuSegmentValue(sku)}</span> : null}
-                        {firstNonEmptyString((sku as Record<string, unknown>).size_text, (sku as Record<string, unknown>).tamano) ? <span>{firstNonEmptyString((sku as Record<string, unknown>).size_text, (sku as Record<string, unknown>).tamano)}</span> : null}
-                      </div>
-                      <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-slate-400">
-                        <div><span className="text-slate-500">Fabricante:</span> {getSkuManufacturerValue(sku) || "-"}</div>
-                        <div><span className="text-slate-500">Grupo:</span> {getSkuGroupValue(sku) || "-"}</div>
-                        <div><span className="text-slate-500">Estado:</span> {getSkuStatusValue(sku) || "-"}</div>
-                        <div><span className="text-slate-500">Metadata:</span> {hasSkuMetadata(sku) ? "Sí" : "No"}</div>
-                      </div>
-                        <div className="mt-3 flex flex-wrap gap-2">
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            onClick={() => setSkuCatalogDetailCode(code)}
-                          >
-                            Ver detalle
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            onClick={() => {
-                            setSelectedSkuId(code);
-                            setSkuImageBrowserSkuId(code);
-                            setTestSkuId(code);
-                            setSkuWorkspaceTab("dataset");
-                          }}
-                          >
-                            Usar este SKU
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            onClick={() => {
-                              setSkuDeleteTargetId(code);
-                              setSelectedSkuId(code);
-                              setSkuImageBrowserSkuId(code);
-                              setSkuDeleteDialogOpen(true);
-                            }}
-                          >
-                            Desactivar
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            onClick={() => {
-                            setSkuForm({
-                              sku_code: code,
-                              sku_name: getSkuNameValue(sku),
-                              brand: getSkuBrandValue(sku),
-                              family: getSkuFamilyValue(sku),
-                              variant: firstNonEmptyString((sku as Record<string, unknown>).variant, (sku as Record<string, unknown>).formato),
-                              size_text: firstNonEmptyString((sku as Record<string, unknown>).size_text, (sku as Record<string, unknown>).tamano),
-                              barcode: firstNonEmptyString((sku as Record<string, unknown>).barcode, (sku as Record<string, unknown>).ean),
-                              estado: getSkuStatusValue(sku),
-                              subcategoria: getSkuSubcategoryValue(sku),
-                              segmento: getSkuSegmentValue(sku),
-                              forma: firstNonEmptyString((sku as Record<string, unknown>).forma),
-                              fabricante: getSkuManufacturerValue(sku),
-                              fragancia_variante: firstNonEmptyString((sku as Record<string, unknown>).fragancia_variante),
-                              pais: firstNonEmptyString((sku as Record<string, unknown>).pais),
-                              grupo: getSkuGroupValue(sku),
-                              segmento_funcional: firstNonEmptyString((sku as Record<string, unknown>).segmento_funcional),
-                              category_cuenta: firstNonEmptyString((sku as Record<string, unknown>).category_cuenta),
-                              x_ancho: firstNonEmptyString((sku as Record<string, unknown>).x_ancho),
-                              y_alto: firstNonEmptyString((sku as Record<string, unknown>).y_alto),
-                              z_profundidad: firstNonEmptyString((sku as Record<string, unknown>).z_profundidad),
-                              metadata_json: JSON.stringify(getSkuMetadataValue(sku) ?? {}, null, 2),
-                            });
-                            setSkuWorkspaceTab("cargas");
-                          }}
-                        >
-                          Cargar al formulario
-                        </Button>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-                {filteredSkusCatalog.length > paginatedSkusCatalog.length ? (
-                  <p className="mt-3 text-xs text-slate-400">Navega por páginas para revisar el catálogo completo sin hacer gigante la vista.</p>
-                ) : null}
+            </div>
+
+            <div className="grid gap-4 xl:grid-cols-[minmax(280px,340px)_minmax(0,1fr)]">
+              <div className="max-h-[72vh] overflow-y-auto rounded-xl border border-white/10 bg-slate-950/50 p-2">
+                <p className="sticky top-0 z-10 border-b border-white/10 bg-slate-950/95 px-2 py-2 text-xs font-semibold uppercase tracking-wide text-slate-400">Catálogo · lista</p>
+                <div className="space-y-2 p-1">
+                  {paginatedCatalogSkus.map((sku) => {
+                    const code = getSkuCodeValue(sku);
+                    const selected = code === skuCatalogDetailCode || code === activeSkuWorkspaceId;
+                    const coverage = resolveSkuDatasetCoverage(sku);
+                    const imageCount = coverage.images;
+                    return (
+                      <button
+                        key={`cat-sku-${code || sku.id}`}
+                        type="button"
+                        onClick={() => code && selectCatalogSku(code)}
+                        className={`w-full rounded-lg border p-3 text-left transition ${selected ? "border-cyan-300/40 bg-cyan-500/10 ring-1 ring-cyan-400/20" : "border-white/10 bg-black/20 hover:bg-black/30"}`}
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <p className="font-mono text-sm text-slate-100">{code || "—"}</p>
+                          <Badge variant={imageCount > 0 ? "default" : "secondary"}>{imageCount} img</Badge>
+                        </div>
+                        <p className="mt-1 line-clamp-2 text-xs text-slate-300">{getSkuNameValue(sku) || "Sin nombre"}</p>
+                        <div className="mt-2 flex flex-wrap gap-1 text-[10px] text-slate-400">
+                          {getSkuBrandValue(sku) ? <span>{getSkuBrandValue(sku)}</span> : null}
+                          {getSkuFamilyValue(sku) ? <span>· {getSkuFamilyValue(sku)}</span> : null}
+                        </div>
+                        <Badge className="mt-2" variant="outline">{activeLabel((sku as Record<string, unknown>).is_active)}</Badge>
+                      </button>
+                    );
+                  })}
+                  {!paginatedCatalogSkus.length ? <p className="px-2 py-6 text-center text-sm text-slate-400">Ningún SKU coincide con los filtros.</p> : null}
+                </div>
               </div>
 
+              <div className="space-y-4">
               {selectedSkuCatalogDetail ? (
-                <div className="rounded-lg border border-cyan-300/20 bg-cyan-500/5 p-4">
+                <div className="rounded-xl border border-cyan-300/20 bg-cyan-500/5 p-4">
                   <div className="flex flex-wrap items-start justify-between gap-3">
                     <div>
-                      <p className="text-sm font-semibold">Detalle del SKU</p>
-                      <p className="text-xs text-slate-300">Revisa la ficha completa antes de pasar al dataset, pruebas o edición.</p>
+                      <p className="font-mono text-base text-slate-100">{getSkuCodeValue(selectedSkuCatalogDetail)}</p>
+                      <p className="mt-1 text-sm text-slate-200">{getSkuNameValue(selectedSkuCatalogDetail) || "Sin nombre"}</p>
+                      <p className="mt-1 text-xs text-slate-400">{getSkuBrandValue(selectedSkuCatalogDetail) || "-"} · {getSkuFamilyValue(selectedSkuCatalogDetail) || "-"}</p>
                     </div>
                     <div className="flex flex-wrap gap-2">
-                      <Badge variant="outline">{getSkuCodeValue(selectedSkuCatalogDetail)}</Badge>
                       <Badge variant="outline">{getSkuStatusValue(selectedSkuCatalogDetail)}</Badge>
+                      {(() => {
+                        const code = getSkuCodeValue(selectedSkuCatalogDetail);
+                        const cov = selectedSkuCatalogDetail ? resolveSkuDatasetCoverage(selectedSkuCatalogDetail) : undefined;
+                        return <Badge variant={(cov?.images ?? 0) > 0 ? "default" : "secondary"}>{cov?.images ?? 0} imágenes · {cov?.indexable ?? 0} indexables</Badge>;
+                      })()}
                     </div>
+                  </div>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <Button size="sm" onClick={() => { selectDatasetSku(getSkuCodeValue(selectedSkuCatalogDetail)); setSkuWorkspaceTab("dataset"); }}>Dataset activo</Button>
+                    <Button size="sm" variant="outline" onClick={() => { loadSkuToForm(selectedSkuCatalogDetail); setCargasWorkspaceSection("ficha"); setSkuWorkspaceTab("cargas"); }}>Editar en cargas</Button>
+                    <Button size="sm" variant="outline" onClick={() => { selectCatalogSku(getSkuCodeValue(selectedSkuCatalogDetail)); setSkuWorkspaceTab("pruebas"); }}>Probar SKU</Button>
+                    <Button size="sm" variant="ghost" onClick={() => { const code = getSkuCodeValue(selectedSkuCatalogDetail); setSkuDeleteTargetId(code); setSkuDeleteDialogOpen(true); }}>Desactivar</Button>
                   </div>
                   <div className="mt-4 grid gap-3 lg:grid-cols-3">
                     <div className="rounded-lg border border-white/10 bg-slate-950/40 p-3 text-sm text-slate-100">
@@ -5479,6 +6704,21 @@ export function AccountShelfPage({ account }: Props) {
                       <p><span className="text-slate-500">Fragancia:</span> {firstNonEmptyString(selectedSkuCatalogDetail.fragancia_variante) || "-"}</p>
                     </div>
                   </div>
+                  <div className="mt-3 rounded-lg border border-amber-300/20 bg-amber-500/5 p-3 text-sm text-slate-100">
+                    <p className="mb-2 text-xs text-amber-100">Confusiones registradas</p>
+                    <p className="text-lg font-semibold text-slate-100">{(catalogSkuHardNegativesQuery.data ?? []).length}</p>
+                    <p className="mt-1 text-xs text-slate-400">SKUs similares que no deben contarse como este producto.</p>
+                    {(catalogSkuHardNegativesQuery.data ?? []).length ? (
+                      <div className="mt-2 space-y-1">
+                        {(catalogSkuHardNegativesQuery.data ?? []).slice(0, 6).map((item, idx) => (
+                          <p key={`cat-hn-${idx}`} className="font-mono text-xs text-slate-300">
+                            {String(item.negative_sku_id ?? item.negative_sku_code ?? "-")}
+                            {item.reason ? <span className="text-slate-500"> · {String(item.reason)}</span> : null}
+                          </p>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
                   <div className="mt-3 grid gap-3 lg:grid-cols-[0.9fr,1.1fr]">
                     <div className="rounded-lg border border-white/10 bg-slate-950/40 p-3 text-sm text-slate-100">
                       <p className="mb-2 text-xs text-slate-400">Dimensiones y auditoría</p>
@@ -5493,104 +6733,129 @@ export function AccountShelfPage({ account }: Props) {
                     </div>
                   </div>
                 </div>
-              ) : null}
-
-              <div className="rounded-lg border border-amber-300/20 bg-amber-500/5 p-4">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div>
-                    <p className="text-sm font-semibold">Mantenimiento del SKU</p>
-                    <p className="text-xs text-slate-300">El flujo de eliminar o desactivar SKU ahora vive en un diálogo para no ocupar media pantalla.</p>
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    <Badge variant="outline">SKU objetivo: {activeSkuDeleteId || "no seleccionado"}</Badge>
-                    <Button variant="outline" onClick={() => setSkuDeleteDialogOpen(true)} disabled={!activeSkuDeleteId}>
-                      Abrir diálogo
-                    </Button>
-                  </div>
+              ) : (
+                <div className="flex min-h-[320px] flex-col items-center justify-center rounded-xl border border-dashed border-white/15 bg-black/20 p-8 text-center">
+                  <p className="text-sm font-semibold text-slate-200">Selecciona un SKU de la lista</p>
+                  <p className="mt-2 max-w-md text-xs text-slate-400">Verás la ficha completa, cobertura de imágenes y accesos directos al dataset, cargas o pruebas.</p>
                 </div>
-              </div>
+              )}
 
-              <div className="rounded-lg border border-white/10 bg-black/20 p-3">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div>
-                    <p className="text-sm font-semibold">Tabla rápida del catálogo</p>
-                    <p className="text-xs text-slate-300">Sirve para escanear datos existentes. Hoy no hay endpoint de edición directa, pero sí puedes cargar cualquier SKU al formulario superior.</p>
+              <details className="rounded-xl border border-amber-300/20 bg-amber-500/5 p-3">
+                <summary className="cursor-pointer text-sm font-semibold text-amber-100">Mantenimiento y tabla rápida</summary>
+                <div className="mt-4 space-y-4">
+                  <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-white/10 bg-black/20 p-3">
+                    <div>
+                      <p className="text-sm font-semibold text-slate-100">Desactivar o eliminar SKU</p>
+                      <p className="text-xs text-slate-300">Flujo protegido en diálogo de confirmación.</p>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <Badge variant="outline">SKU: {activeSkuDeleteId || "no seleccionado"}</Badge>
+                      <Button variant="outline" size="sm" onClick={() => setSkuDeleteDialogOpen(true)} disabled={!activeSkuDeleteId}>Abrir diálogo</Button>
+                    </div>
                   </div>
-                  <Badge variant="outline">Catálogo filtrado: {filteredSkusCatalog.length}</Badge>
-                </div>
-                <div className="mt-3 overflow-x-auto rounded-lg border border-white/10">
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead>id</TableHead>
-                        <TableHead>sku_code</TableHead>
-                        <TableHead>nombre</TableHead>
-                        <TableHead>marca</TableHead>
-                        <TableHead>categoria</TableHead>
-                        <TableHead>subcategoria</TableHead>
-                        <TableHead>segmento</TableHead>
-                        <TableHead>fabricante</TableHead>
-                        <TableHead>tamano</TableHead>
-                        <TableHead>updated_at</TableHead>
-                        <TableHead>accion</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {paginatedSkusCatalog.map((sku: ShelfSku) => (
-                        <TableRow key={`sku-${sku.id ?? sku.sku_id ?? sku.sku_code ?? Math.random()}`}>
-                          <TableCell>{String(sku.id ?? sku.sku_id ?? "-")}</TableCell>
-                          <TableCell>{getSkuCodeValue(sku) || "-"}</TableCell>
-                          <TableCell>{getSkuNameValue(sku) || "-"}</TableCell>
-                          <TableCell>{getSkuBrandValue(sku) || "-"}</TableCell>
-                          <TableCell>{getSkuFamilyValue(sku) || "-"}</TableCell>
-                          <TableCell>{getSkuSubcategoryValue(sku) || "-"}</TableCell>
-                          <TableCell>{getSkuSegmentValue(sku) || "-"}</TableCell>
-                          <TableCell>{getSkuManufacturerValue(sku) || "-"}</TableCell>
-                          <TableCell>{firstNonEmptyString((sku as Record<string, unknown>).size_text, (sku as Record<string, unknown>).tamano) || "-"}</TableCell>
-                          <TableCell>{String(sku.updated_at ?? "-")}</TableCell>
-                          <TableCell>
-                            <div className="flex flex-wrap gap-2">
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                onClick={() => {
-                                  const code = getSkuCodeValue(sku);
-                                  setSelectedSkuId(code);
-                                  setSkuImageBrowserSkuId(code);
-                                  setTestSkuId(code);
-                                  setSkuWorkspaceTab("dataset");
-                                }}
-                              >
-                                Abrir
-                              </Button>
-                              <Button
-                                size="sm"
-                                variant="ghost"
-                                onClick={() => {
-                                  const code = getSkuCodeValue(sku);
-                                  setSkuDeleteTargetId(code);
-                                  setSelectedSkuId(code);
-                                  setSkuDeleteDialogOpen(true);
-                                }}
-                              >
-                                Desactivar
-                              </Button>
-                            </div>
-                          </TableCell>
+                  <div className="overflow-x-auto rounded-lg border border-white/10 bg-black/20 p-3">
+                    <p className="mb-2 text-xs text-slate-400">Tabla escaneo · {filteredCatalogSkus.length} SKUs filtrados · página {skuCatalogPage}</p>
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>sku_code</TableHead>
+                          <TableHead>nombre</TableHead>
+                          <TableHead>marca</TableHead>
+                          <TableHead>categoria</TableHead>
+                          <TableHead>imágenes</TableHead>
+                          <TableHead>acción</TableHead>
                         </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
+                      </TableHeader>
+                      <TableBody>
+                        {paginatedCatalogSkus.map((sku: ShelfSku) => {
+                          const code = getSkuCodeValue(sku);
+                          const cov = resolveSkuDatasetCoverage(sku);
+                          return (
+                            <TableRow key={`sku-tbl-${sku.id ?? code}`}>
+                              <TableCell className="font-mono text-xs">{code || "-"}</TableCell>
+                              <TableCell>{getSkuNameValue(sku) || "-"}</TableCell>
+                              <TableCell>{getSkuBrandValue(sku) || "-"}</TableCell>
+                              <TableCell>{getSkuFamilyValue(sku) || "-"}</TableCell>
+                              <TableCell>{cov.images}</TableCell>
+                              <TableCell>
+                                <div className="flex flex-wrap gap-1">
+                                  <Button size="sm" variant="outline" onClick={() => code && selectCatalogSku(code)}>Ver</Button>
+                                  <Button size="sm" variant="ghost" onClick={() => { if (!code) return; selectDatasetSku(code); setSkuWorkspaceTab("dataset"); }}>Dataset</Button>
+                                </div>
+                              </TableCell>
+                            </TableRow>
+                          );
+                        })}
+                      </TableBody>
+                    </Table>
+                  </div>
                 </div>
+              </details>
               </div>
+            </div>
             </>
             ) : null}
 
             {skuWorkspaceTab === "cargas" ? (
+            <>
+            <div className="rounded-xl border border-cyan-300/20 bg-gradient-to-br from-cyan-500/10 via-slate-950/60 to-slate-950/80 p-4">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <p className="text-sm font-semibold text-slate-100">Cargas y entrenamiento · alta y dataset</p>
+                  <p className="text-xs text-slate-300">Crea SKUs manualmente, importa lotes o asocia imágenes al dataset. Elige el SKU activo desde el catálogo lateral.</p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Badge variant="outline">SKU activo: {activeSkuWorkspaceId || skuForm.sku_code || "ninguno"}</Badge>
+                  {activeSkuWorkspaceInfo ? <Badge variant="secondary">{getSkuNameValue(activeSkuWorkspaceInfo) || "sin nombre"}</Badge> : null}
+                  <Button size="sm" variant="outline" onClick={() => activeSkuWorkspaceInfo && setSkuWorkspaceTab("dataset")} disabled={!activeSkuWorkspaceId}>Ver dataset</Button>
+                  <Button size="sm" variant="outline" onClick={() => skusQuery.refetch()} disabled={skusQuery.isFetching}>Refrescar</Button>
+                </div>
+              </div>
+            </div>
+
+            <div className="grid gap-4 xl:grid-cols-[minmax(260px,300px)_minmax(0,1fr)]">
+              <div className="space-y-3">
+                <div className="rounded-xl border border-white/10 bg-black/20 p-3">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">Buscar SKU</p>
+                  <Input className="mt-2" value={skuCatalogSearch} onChange={(e) => setSkuCatalogSearch(e.target.value)} placeholder="Filtrar catálogo..." />
+                  <div className="mt-2 max-h-[50vh] space-y-2 overflow-y-auto">
+                    {paginatedCatalogSkus.slice(0, 24).map((sku) => {
+                      const code = getSkuCodeValue(sku);
+                      const selected = code === activeSkuWorkspaceId || code === skuForm.sku_code;
+                      return (
+                        <button
+                          key={`cg-sku-${code || sku.id}`}
+                          type="button"
+                          onClick={() => { if (!code) return; selectCatalogSku(code); loadSkuToForm(sku); }}
+                          className={`w-full rounded-md border p-2 text-left text-xs transition ${selected ? "border-cyan-300/40 bg-cyan-500/10" : "border-white/10 bg-slate-950/40 hover:bg-black/30"}`}
+                        >
+                          <p className="font-mono text-slate-100">{code || "—"}</p>
+                          <p className="mt-1 line-clamp-1 text-slate-400">{getSkuNameValue(sku) || "Sin nombre"}</p>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+                {activeSkuWorkspaceInfo ? (
+                  <div className="rounded-xl border border-cyan-300/20 bg-cyan-500/5 p-3 text-xs text-slate-300">
+                    <p className="font-mono text-sm text-slate-100">{getSkuCodeValue(activeSkuWorkspaceInfo)}</p>
+                    <p className="mt-1">{getSkuBrandValue(activeSkuWorkspaceInfo)} · {getSkuFamilyValue(activeSkuWorkspaceInfo)}</p>
+                    <p className="mt-2 text-slate-400">{activeSkuWorkspaceInfo ? resolveSkuDatasetCoverage(activeSkuWorkspaceInfo).images : currentSkuImageSummary.total} imágenes en dataset</p>
+                  </div>
+                ) : null}
+              </div>
+
               <div className="space-y-4">
-              <div className="rounded-lg border border-white/10 bg-black/20 p-3">
-                <p className="mb-2 text-sm font-semibold">Crear o preparar SKU manualmente</p>
-                <p className="mb-3 text-xs text-slate-300">La ficha ahora está ordenada por bloques para que sea más claro revisar qué existe, qué falta y qué quieres ajustar antes de seguir.</p>
+                <div className="flex flex-wrap gap-2">
+                  <Button size="sm" variant={cargasWorkspaceSection === "ficha" ? "default" : "outline"} onClick={() => setCargasWorkspaceSection("ficha")}>Ficha manual</Button>
+                  <Button size="sm" variant={cargasWorkspaceSection === "bulk" ? "default" : "outline"} onClick={() => setCargasWorkspaceSection("bulk")}>Carga masiva</Button>
+                  <Button size="sm" variant={cargasWorkspaceSection === "images" ? "default" : "outline"} onClick={() => setCargasWorkspaceSection("images")}>Imágenes al dataset</Button>
+                </div>
+
+              {cargasWorkspaceSection === "ficha" ? (
+              <div className="rounded-xl border border-white/10 bg-black/20 p-4">
+                <p className="mb-2 text-sm font-semibold text-slate-100">Crear o preparar SKU manualmente</p>
+                <p className="mb-3 text-xs text-slate-300">Ficha ordenada por bloques: identidad, clasificación, producto y dimensiones.</p>
               <div className="grid gap-4 xl:grid-cols-2">
                 <div className="rounded-lg border border-white/10 bg-slate-950/30 p-3">
                   <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-slate-400">Identidad</p>
@@ -5641,9 +6906,11 @@ export function AccountShelfPage({ account }: Props) {
                 <Button onClick={() => createSkuMutation.mutate()} disabled={createSkuMutation.isPending}>Crear SKU</Button>
               </div>
             </div>
+              ) : null}
 
-            <div className="rounded-lg border border-white/10 bg-black/20 p-3">
-              <p className="mb-2 text-sm font-semibold">Carga masiva SKUs (JSON o CSV)</p>
+            {cargasWorkspaceSection === "bulk" ? (
+            <div className="rounded-xl border border-white/10 bg-black/20 p-4">
+              <p className="mb-2 text-sm font-semibold text-slate-100">Carga masiva SKUs (JSON o CSV)</p>
               <p className="mb-3 text-xs text-slate-300">
                 Compatible con formato actual (`sku_code`, `sku_name`) y con seed de demo (`sku_id`, `nombre`, `marca`, `categoria`, `subcategoria`, `tamano`, `ean`).
                 Si mandas campos extra dentro de `metadata`, se preservan ahí para no perder detalle al importar.
@@ -5728,23 +6995,26 @@ export function AccountShelfPage({ account }: Props) {
                 </div>
               )}
             </div>
+            ) : null}
 
-            <div className="rounded-lg border border-white/10 bg-black/20 p-3">
-              <p className="mb-2 text-sm font-semibold">Agregar imágenes al dataset real del SKU</p>
+            {cargasWorkspaceSection === "images" ? (
+            <div className="rounded-xl border border-white/10 bg-black/20 p-4">
+              <p className="mb-2 text-sm font-semibold text-slate-100">Agregar imágenes al dataset real del SKU</p>
               <p className="mb-3 text-xs text-slate-300">Este bloque sí escribe directo sobre el dataset del SKU. Úsalo cuando ya sabes exactamente a qué SKU pertenece la imagen.</p>
               <div className="grid gap-3 md:grid-cols-[1fr_1fr_auto]">
                 <div className="space-y-2">
+                  <Label>sku_id destino</Label>
                   <Input placeholder="sku_id (ej: KALIPTO_DESINF_1L)" value={selectedSkuId} onChange={(e) => setSelectedSkuId(e.target.value)} />
                   <select
                     className="h-10 w-full rounded-md border border-white/10 bg-slate-900 px-3 text-sm"
-                    value=""
+                    value={selectedSkuId || ""}
                     onChange={(e) => {
                       if (!e.target.value) return;
-                      setSelectedSkuId(e.target.value);
+                      selectCatalogSku(e.target.value);
                     }}
                   >
                     <option value="">Selecciona SKU desde catálogo...</option>
-                    {(skusQuery.data ?? []).map((sku: ShelfSku) => {
+                    {paginatedCatalogSkus.map((sku: ShelfSku) => {
                       const code = getSkuCodeValue(sku);
                       const name = getSkuNameValue(sku);
                       if (!code) return null;
@@ -5781,16 +7051,15 @@ export function AccountShelfPage({ account }: Props) {
                 </div>
               </div>
             </div>
+            ) : null}
 
             {recentSkuImageResponses.length ? (
-              <div className="rounded-lg border border-cyan-300/20 bg-cyan-500/5 p-3">
-                <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-                  <div>
-                    <p className="text-sm font-semibold">Diagnóstico de asociación reciente</p>
-                    <p className="text-xs text-slate-300">Resumen técnico amigable de lo que hizo backend al asociar imágenes al SKU.</p>
-                  </div>
-                  <Button variant="outline" size="sm" onClick={() => setRecentSkuImageResponses([])}>Limpiar panel</Button>
-                </div>
+              <details className="rounded-xl border border-cyan-300/20 bg-cyan-500/5 p-3" open>
+                <summary className="flex cursor-pointer list-none flex-wrap items-center justify-between gap-2 text-sm font-semibold text-slate-100 [&::-webkit-details-marker]:hidden">
+                  <span>Diagnóstico de asociación reciente ({recentSkuImageResponses.length})</span>
+                  <Button variant="outline" size="sm" onClick={(e) => { e.preventDefault(); setRecentSkuImageResponses([]); }}>Limpiar</Button>
+                </summary>
+                <div className="mt-3">
                 <div className="space-y-3">
                   {recentSkuImageResponses.map((response, idx) => {
                     const diagnostics = normalizeDiagnosticsPayload(response.diagnostics);
@@ -5877,444 +7146,435 @@ export function AccountShelfPage({ account }: Props) {
                     );
                   })}
                 </div>
-              </div>
+                </div>
+              </details>
             ) : null}
-            </div>
-            ) : null}
-
-            {skuWorkspaceTab === "dataset" ? (
-            <>
-            <div className="rounded-lg border border-cyan-300/20 bg-cyan-500/5 p-4">
-              <div className="flex flex-wrap items-start justify-between gap-3">
-                <div>
-                  <p className="text-sm font-semibold">SKU seleccionado para dataset y reentrenamiento</p>
-                  <p className="text-xs text-slate-300">Al elegir un SKU en el catálogo, esta zona te deja revisar sus imágenes, recalcular embeddings y validar si DINOv2 / SigLIP quedaron sanos.</p>
-                </div>
-                <Badge variant="outline">SKU activo: {activeSkuWorkspaceId || "no seleccionado"}</Badge>
               </div>
-              {activeSkuWorkspaceInfo ? (
-                <div className="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-                  <div className="rounded-lg border border-white/10 bg-black/20 p-3">
-                    <p className="text-xs text-slate-400">SKU</p>
-                    <p className="mt-1 font-mono text-sm text-slate-100">{getSkuCodeValue(activeSkuWorkspaceInfo)}</p>
-                    <p className="mt-1 text-sm text-slate-200">{getSkuNameValue(activeSkuWorkspaceInfo) || "Sin nombre"}</p>
-                  </div>
-                  <div className="rounded-lg border border-white/10 bg-black/20 p-3">
-                    <p className="text-xs text-slate-400">Marca / familia</p>
-                    <p className="mt-1 text-sm text-slate-100">{getSkuBrandValue(activeSkuWorkspaceInfo) || "-"}</p>
-                    <p className="mt-1 text-sm text-slate-300">{getSkuFamilyValue(activeSkuWorkspaceInfo) || "-"}</p>
-                  </div>
-                  <div className="rounded-lg border border-white/10 bg-black/20 p-3">
-                    <p className="text-xs text-slate-400">Imágenes cargadas</p>
-                    <p className="mt-1 text-sm text-slate-100">{currentSkuImageSummary.total} total</p>
-                    <p className="mt-1 text-sm text-slate-300">{currentSkuImageSummary.active} activas / {currentSkuImageSummary.inactive} inactivas</p>
-                  </div>
-                  <div className="rounded-lg border border-white/10 bg-black/20 p-3">
-                    <p className="text-xs text-slate-400">Último recálculo</p>
-                    <p className="mt-1 text-sm text-slate-100">{recomputeSummary.processed} procesadas</p>
-                    <p className="mt-1 text-sm text-slate-300">OK {percentLabel(recomputeSummary.successRate)} · fallback {percentLabel(recomputeSummary.fallbackRate)} · fallo {percentLabel(recomputeSummary.failedRate)}</p>
-                  </div>
-                </div>
-              ) : (
-                <p className="mt-3 text-sm text-slate-400">Selecciona un SKU desde Catálogo para cargar aquí su contexto técnico.</p>
-              )}
-              <div className="mt-3 grid gap-3 md:grid-cols-2">
-                <div className="rounded-lg border border-white/10 bg-black/20 p-3">
-                  <div className="flex items-center justify-between gap-2">
-                    <p className="text-xs text-slate-400">dinov2</p>
-                    <Badge variant={vectorIndexHealth.dinov2.sampleDim !== null && vectorIndexHealth.dinov2.sampleDim >= 512 ? "default" : "secondary"}>
-                      {vectorIndexHealth.dinov2.status}
-                    </Badge>
-                  </div>
-                  <p className="mt-2 text-sm text-slate-100">sample_dim: {vectorIndexHealth.dinov2.sampleDim ?? "-"}</p>
-                  <p className="mt-1 text-xs text-slate-400">
-                    {vectorIndexHealth.dinov2.sampleDim !== null && vectorIndexHealth.dinov2.sampleDim < 512
-                      ? "Embeddings antiguos o degradados: conviene recalcular."
-                      : "Dimensión esperada sana para dinov2."}
-                  </p>
-                </div>
-                <div className="rounded-lg border border-white/10 bg-black/20 p-3">
-                  <div className="flex items-center justify-between gap-2">
-                    <p className="text-xs text-slate-400">siglip</p>
-                    <Badge variant={vectorIndexHealth.siglip.sampleDim !== null && vectorIndexHealth.siglip.sampleDim >= 512 ? "default" : "secondary"}>
-                      {vectorIndexHealth.siglip.status}
-                    </Badge>
-                  </div>
-                  <p className="mt-2 text-sm text-slate-100">sample_dim: {vectorIndexHealth.siglip.sampleDim ?? "-"}</p>
-                  <p className="mt-1 text-xs text-slate-400">
-                    {vectorIndexHealth.siglip.sampleDim !== null && vectorIndexHealth.siglip.sampleDim < 512
-                      ? "Embeddings antiguos o degradados: conviene recalcular."
-                      : "Dimensión esperada sana para siglip."}
-                  </p>
-                </div>
-              </div>
-            </div>
-
-            <div className="rounded-lg border border-amber-300/20 bg-amber-500/5 p-4">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div>
-                  <p className="text-sm font-semibold">Recalcular embeddings</p>
-                  <p className="text-xs text-slate-300">Si dejas vacío `image_ids`, el frontend reentrena el SKU activo completo usando sus imágenes del dataset.</p>
-                </div>
-                <Badge variant="outline">/shelf/embeddings/recompute</Badge>
-              </div>
-              <div className="mt-3 grid gap-3 xl:grid-cols-[1.2fr_1fr_1fr]">
-                <div className="space-y-2">
-                  <Label>image_ids</Label>
-                  <Textarea value={recomputeImageIdsText} onChange={(e) => setRecomputeImageIdsText(e.target.value)} rows={5} />
-                  <div className="flex flex-wrap gap-2">
-                    <Button size="sm" variant="outline" onClick={() => setRecomputeImageIdsText(currentSkuImageIds.map((item) => String(item)).join("\n"))} disabled={!currentSkuImageIds.length}>
-                      Usar imágenes del SKU actual
-                    </Button>
-                    <Button size="sm" variant="ghost" onClick={() => setRecomputeImageIdsText("")}>Limpiar</Button>
-                  </div>
-                </div>
-                <div className="space-y-2">
-                  <Label>model_names</Label>
-                  <Textarea value={recomputeModelNamesText} onChange={(e) => setRecomputeModelNamesText(e.target.value)} rows={5} />
-                  <p className="text-xs text-slate-400">Recomendado: `dinov2` y `siglip`, uno por línea.</p>
-                </div>
-                <div className="space-y-3">
-                  <div className="rounded-lg border border-white/10 bg-black/20 p-3">
-                    <div className="flex items-start justify-between gap-3">
-                      <div>
-                        <p className="text-sm font-medium text-slate-100">Incluir inactivas</p>
-                        <p className="mt-1 text-xs text-slate-400">Solo aplica cuando reentrenas por `sku_id` completo.</p>
-                      </div>
-                      <Switch checked={recomputeIncludeInactiveImages} onCheckedChange={setRecomputeIncludeInactiveImages} />
-                    </div>
-                  </div>
-                  <div className="rounded-lg border border-white/10 bg-black/20 p-3">
-                    <div className="flex items-start justify-between gap-3">
-                      <div>
-                        <p className="text-sm font-medium text-slate-100">rebuild_index</p>
-                        <p className="mt-1 text-xs text-slate-400">Lo normal es dejarlo activo para que el índice se alinee con el nuevo embedding.</p>
-                      </div>
-                      <Switch checked={recomputeRebuildIndex} onCheckedChange={setRecomputeRebuildIndex} />
-                    </div>
-                  </div>
-                  <div className="space-y-2 rounded-lg border border-white/10 bg-black/20 p-3">
-                    <Label>limit</Label>
-                    <Input value={recomputeLimit} onChange={(e) => setRecomputeLimit(e.target.value)} placeholder="500" />
-                    <p className="text-xs text-slate-400">Límite máximo de imágenes cuando reentrenas un SKU completo.</p>
-                  </div>
-                  <Button onClick={() => recomputeEmbeddingsMutation.mutate()} disabled={recomputeEmbeddingsMutation.isPending}>
-                    Recalcular embeddings
-                  </Button>
-                </div>
-              </div>
-              {lastEmbeddingsRecompute ? (
-                <div className="mt-3 rounded-lg border border-white/10 bg-black/20 p-3">
-                  <div className="flex flex-wrap gap-2">
-                    <Badge variant="outline">status: {String(lastEmbeddingsRecompute.status ?? "-")}</Badge>
-                    <Badge variant="outline">sku_id: {(lastEmbeddingsRecompute.sku_id ?? activeSkuWorkspaceId) || "-"}</Badge>
-                    <Badge variant="outline">modelos: {formatModelNames(lastEmbeddingsRecompute.used_models ?? lastEmbeddingsRecompute.model_names)}</Badge>
-                    <Badge variant="outline">rebuild_index: {lastEmbeddingsRecompute.rebuild_index ? "sí" : "no"}</Badge>
-                    <Badge variant={diagnosticsEmbeddingTone(lastEmbeddingsRecompute.diagnostics ?? null)}>
-                      {diagnosticsEmbeddingUiLabel(lastEmbeddingsRecompute.diagnostics ?? null)}
-                    </Badge>
-                  </div>
-                  <div className="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-                    <div className="rounded-lg border border-white/10 bg-slate-950/40 p-3"><p className="text-xs text-slate-400">% OK</p><p className="mt-1 text-sm text-slate-100">{percentLabel(recomputeSummary.successRate)}</p></div>
-                    <div className="rounded-lg border border-white/10 bg-slate-950/40 p-3"><p className="text-xs text-slate-400">% fallback</p><p className="mt-1 text-sm text-slate-100">{percentLabel(recomputeSummary.fallbackRate)}</p></div>
-                    <div className="rounded-lg border border-white/10 bg-slate-950/40 p-3"><p className="text-xs text-slate-400">% fallo</p><p className="mt-1 text-sm text-slate-100">{percentLabel(recomputeSummary.failedRate)}</p></div>
-                    <div className="rounded-lg border border-white/10 bg-slate-950/40 p-3"><p className="text-xs text-slate-400">Procesadas</p><p className="mt-1 text-sm text-slate-100">{recomputeSummary.processed}</p></div>
-                  </div>
-                  {lastEmbeddingsRecompute.diagnostics ? (
-                    <div className="mt-3 rounded-lg border border-white/10 bg-slate-950/40 p-3">
-                      <div className="flex flex-wrap gap-2">
-                        <Badge variant={diagnosticsTone(lastEmbeddingsRecompute.diagnostics) === "ok" ? "default" : diagnosticsTone(lastEmbeddingsRecompute.diagnostics) === "warning" ? "secondary" : "destructive"}>
-                          {diagnosticsOutcomeLabel(lastEmbeddingsRecompute.diagnostics)}
-                        </Badge>
-                        <Badge variant="outline">fallback: {lastEmbeddingsRecompute.diagnostics?.models?.fallback_used ? "sí" : "no"}</Badge>
-                        <Badge variant="outline">failed_models: {formatModelNames(lastEmbeddingsRecompute.diagnostics?.models?.failed_models)}</Badge>
-                      </div>
-                      <p className="mt-2 text-xs text-slate-300">{diagnosticsHeadline(lastEmbeddingsRecompute.diagnostics)}</p>
-                      {diagnosticsHasCode(lastEmbeddingsRecompute.diagnostics, "MODEL_CACHE_CORRUPT_OR_INACCESSIBLE") ? (
-                        <p className="mt-2 text-xs text-amber-200">Backend sigue reportando cache/tokenizer corrupto o inaccesible para algún modelo.</p>
-                      ) : null}
-                      {diagnosticsHasCode(lastEmbeddingsRecompute.diagnostics, "MODEL_LOAD_OK") ? (
-                        <p className="mt-1 text-xs text-emerald-200">Se registró carga de modelo OK en este recálculo.</p>
-                      ) : null}
-                    </div>
-                  ) : (
-                    <pre className="mt-3 max-h-56 overflow-auto rounded-lg border border-white/10 bg-slate-950/40 p-3 text-xs text-slate-300">{JSON.stringify(lastEmbeddingsRecompute, null, 2)}</pre>
-                  )}
-                  {(lastEmbeddingsRecompute.items ?? []).length ? (
-                    <div className="mt-3 overflow-x-auto rounded-lg border border-white/10 bg-slate-950/40">
-                      <Table>
-                        <TableHeader>
-                          <TableRow>
-                            <TableHead>image_id</TableHead>
-                            <TableHead>status</TableHead>
-                            <TableHead>outcome</TableHead>
-                            <TableHead>fallback</TableHead>
-                            <TableHead>modelos</TableHead>
-                          </TableRow>
-                        </TableHeader>
-                        <TableBody>
-                          {(lastEmbeddingsRecompute.items ?? []).map((item, idx) => {
-                            const diagnostics = normalizeDiagnosticsPayload(item.diagnostics);
-                            return (
-                              <TableRow key={`recompute-item-${String(item.image_id ?? idx)}`}>
-                                <TableCell>{String(item.image_id ?? "-")}</TableCell>
-                                <TableCell>{item.status ?? "-"}</TableCell>
-                                <TableCell>{diagnosticsOutcomeLabel(diagnostics)}</TableCell>
-                                <TableCell>{diagnostics?.models?.fallback_used ? "sí" : "no"}</TableCell>
-                                <TableCell>{formatModelNames(item.model_names)}</TableCell>
-                              </TableRow>
-                            );
-                          })}
-                        </TableBody>
-                      </Table>
-                    </div>
-                  ) : null}
-                </div>
-              ) : null}
-            </div>
-
-            <div className="rounded-lg border border-white/10 bg-black/20 p-3">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div>
-                  <p className="text-sm font-semibold">Roles de dataset y hard negatives</p>
-                  <p className="text-xs text-slate-300">Separa muestras de referencia, validación y reserva; además registra confusiones visuales reales entre SKUs parecidos.</p>
-                </div>
-                <Badge variant="outline">SKU base: {hardNegativeSkuId || skuImageBrowserSkuId || selectedSkuId || "sin seleccionar"}</Badge>
-              </div>
-              <div className="mt-3 grid gap-3 md:grid-cols-3">
-                <div>
-                  <Label>SKU para summary / hard negatives</Label>
-                  <Input
-                    value={hardNegativeSkuId}
-                    onChange={(e) => {
-                      setHardNegativeSkuId(e.target.value);
-                      setDatasetSummarySkuId(e.target.value);
-                    }}
-                    placeholder="LML0108"
-                  />
-                </div>
-                <div>
-                  <Label>SKU negativo</Label>
-                  <Input value={hardNegativeTargetSkuId} onChange={(e) => setHardNegativeTargetSkuId(e.target.value)} placeholder="LML0122" />
-                </div>
-                <div>
-                  <Label>reason</Label>
-                  <Input value={hardNegativeReason} onChange={(e) => setHardNegativeReason(e.target.value)} placeholder="similar_packaging" />
-                </div>
-              </div>
-              <div className="mt-3 grid gap-3 md:grid-cols-[1fr_auto]">
-                <Input value={hardNegativeNote} onChange={(e) => setHardNegativeNote(e.target.value)} placeholder="Nota opcional: mismo color, formato y aroma parecido" />
-                <Button onClick={() => createHardNegativeMutation.mutate()} disabled={createHardNegativeMutation.isPending || !hardNegativeSkuId.trim() || !hardNegativeTargetSkuId.trim()}>
-                  Guardar hard negative
-                </Button>
-              </div>
-              <div className="mt-3 grid gap-3 md:grid-cols-2">
-                <div className="rounded-lg border border-white/10 bg-slate-950/40 p-3">
-                  <p className="mb-2 text-xs text-slate-400">Resumen del dataset por rol</p>
-                  <div className="space-y-2">
-                    {(datasetSummaryQuery.data?.by_role ?? []).length ? (
-                      (datasetSummaryQuery.data?.by_role ?? []).map((item, idx) => (
-                        <div key={`sku-role-${idx}`} className="flex items-center justify-between rounded-md border border-white/10 bg-black/20 px-3 py-2 text-sm">
-                          <span>{String(item.dataset_role ?? "-")}</span>
-                          <Badge variant="outline">{String(item.count ?? 0)}</Badge>
-                        </div>
-                      ))
-                    ) : (
-                      <p className="text-xs text-slate-400">Sin datos por rol para este SKU todavía.</p>
-                    )}
-                  </div>
-                </div>
-                <div className="rounded-lg border border-white/10 bg-slate-950/40 p-3">
-                  <p className="mb-2 text-xs text-slate-400">Hard negatives registrados</p>
-                  <div className="space-y-2">
-                    {(hardNegativesQuery.data ?? []).length ? (
-                      (hardNegativesQuery.data ?? []).map((item, idx) => (
-                        <div key={`hard-negative-${idx}`} className="rounded-md border border-white/10 bg-black/20 px-3 py-2 text-sm">
-                          <p className="font-mono text-slate-100">{String(item.negative_sku_id ?? item.negative_sku_code ?? "-")}</p>
-                          <p className="mt-1 text-xs text-slate-300">{String(item.reason ?? "sin razón")} · {String(item.note ?? "-")}</p>
-                        </div>
-                      ))
-                    ) : (
-                      <p className="text-xs text-slate-400">Todavía no hay hard negatives para este SKU.</p>
-                    )}
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div className="rounded-lg border border-white/10 bg-black/20 p-3">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div>
-                  <p className="text-sm font-semibold">Dataset visual por SKU</p>
-                  <p className="text-xs text-slate-300">Aquí ves las imágenes que realmente están asociadas al SKU y que alimentan embeddings e índice vectorial.</p>
-                </div>
-                <Button variant="outline" onClick={() => rebuildIndexMutation.mutate()} disabled={rebuildIndexMutation.isPending}>
-                  Reconstruir índice
-                </Button>
-              </div>
-              <div className="mt-3 grid gap-3 xl:grid-cols-[1fr_1fr_auto_auto]">
-                <Input
-                  placeholder="sku_id para navegar imágenes del dataset"
-                  value={skuImageBrowserSkuId}
-                  onChange={(e) => setSkuImageBrowserSkuId(e.target.value)}
-                />
-                <select
-                  className="h-10 w-full rounded-md border border-white/10 bg-slate-900 px-3 text-sm"
-                  value=""
-                  onChange={(e) => {
-                    if (!e.target.value) return;
-                    setSkuImageBrowserSkuId(e.target.value);
-                  }}
-                >
-                  <option value="">Elegir SKU desde catálogo...</option>
-                  {(filteredSkusCatalog.slice(0, 100)).map((sku) => {
-                    const code = getSkuCodeValue(sku);
-                    if (!code) return null;
-                    return <option key={`sku-browser-pick-${code}`} value={code}>{code} - {getSkuNameValue(sku) || "sin nombre"}</option>;
-                  })}
-                </select>
-                <div className="flex items-center gap-2 rounded-md border border-white/10 bg-slate-950/40 px-3 text-sm text-slate-300">
-                  <Switch checked={skuImageBrowserIncludeInactive} onCheckedChange={setSkuImageBrowserIncludeInactive} />
-                  <span>Ver inactivas</span>
-                </div>
-                <Button variant="outline" onClick={() => skuImagesQuery.refetch()} disabled={!skuImageBrowserSkuId.trim()}>
-                  Ver imágenes
-                </Button>
-              </div>
-
-              {skuImagesQuery.data?.length ? (
-                <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                  {skuImagesQuery.data.map((image, idx) => {
-                    const preview = previewUrlOf(image as Record<string, unknown>);
-                    const imageId = image.image_id ?? image.id ?? idx;
-                    const hasPreview = previewAvailableOf(image as Record<string, unknown>);
-                    const roleDraftKey = `${skuImageBrowserSkuId.trim()}::${String(imageId)}`;
-                    const currentDatasetRole = firstNonEmptyString((image as Record<string, unknown>).dataset_role) || "reference_active";
-                    const currentDatasetSplit = firstNonEmptyString((image as Record<string, unknown>).dataset_split);
-                    const roleDraft = imageRoleDrafts[roleDraftKey] ?? {
-                      dataset_role: currentDatasetRole as ShelfDatasetRole,
-                      dataset_split: currentDatasetSplit,
-                    };
-                    return (
-                      <div key={`sku-image-${imageId}`} className="rounded-lg border border-white/10 bg-slate-950/40 p-3">
-                        {hasPreview && preview ? (
-                          // eslint-disable-next-line @next/next/no-img-element
-                          <img src={preview} alt={`SKU image ${imageId}`} className="h-40 w-full rounded-md object-cover" />
-                        ) : (
-                          <div className="flex h-40 flex-col items-center justify-center rounded-md border border-dashed border-white/10 px-4 text-center text-xs text-slate-400">
-                            <span>Sin preview pública</span>
-                            <span className="mt-1 text-[11px] text-slate-500">{previewUnavailableReasonOf(image as Record<string, unknown>)}</span>
-                          </div>
-                        )}
-                        <div className="mt-3 space-y-1 text-xs text-slate-300">
-                          <p><span className="text-slate-400">id:</span> {String(imageId)}</p>
-                          <p><span className="text-slate-400">source_type:</span> {firstNonEmptyString((image as Record<string, unknown>).source_type, (image as Record<string, unknown>).asset_type) || "-"}</p>
-                          <p><span className="text-slate-400">dataset_role:</span> {currentDatasetRole}</p>
-                          <p><span className="text-slate-400">dataset_split:</span> {currentDatasetSplit || "-"}</p>
-                          <p><span className="text-slate-400">content_hash:</span> {firstNonEmptyString((image as Record<string, unknown>).content_hash) || "-"}</p>
-                          <p><span className="text-slate-400">estado:</span> {activeLabel((image as Record<string, unknown>).is_active)}</p>
-                          <p><span className="text-slate-400">created_at:</span> {firstNonEmptyString((image as Record<string, unknown>).created_at) || "-"}</p>
-                        </div>
-                        <div className="mt-3 grid gap-2">
-                          <select
-                            className="h-10 w-full rounded-md border border-white/10 bg-slate-900 px-3 text-sm"
-                            value={roleDraft.dataset_role}
-                            onChange={(e) => setImageRoleDrafts((prev) => ({
-                              ...prev,
-                              [roleDraftKey]: {
-                                dataset_role: e.target.value as ShelfDatasetRole,
-                                dataset_split: roleDraft.dataset_split,
-                              },
-                            }))}
-                          >
-                            {SHELF_DATASET_ROLE_OPTIONS.map((role) => (
-                              <option key={`image-role-${imageId}-${role}`} value={role}>{role}</option>
-                            ))}
-                          </select>
-                          <Input
-                            value={roleDraft.dataset_split}
-                            onChange={(e) => setImageRoleDrafts((prev) => ({
-                              ...prev,
-                              [roleDraftKey]: {
-                                dataset_role: roleDraft.dataset_role,
-                                dataset_split: e.target.value,
-                              },
-                            }))}
-                            placeholder="dataset_split opcional"
-                          />
-                        </div>
-                        <div className="mt-3 flex flex-wrap gap-2">
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            onClick={() => getSkuImageDetailMutation.mutate({ skuId: skuImageBrowserSkuId.trim(), imageId })}
-                          >
-                            Ver detalle
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            onClick={() => patchShelfImageRoleMutation.mutate({
-                              skuId: skuImageBrowserSkuId.trim(),
-                              imageId,
-                              dataset_role: roleDraft.dataset_role,
-                              dataset_split: roleDraft.dataset_split,
-                            })}
-                          >
-                            Guardar rol
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            onClick={() => deleteSkuImageMutation.mutate({ skuId: skuImageBrowserSkuId.trim(), imageId })}
-                          >
-                            Desactivar imagen
-                          </Button>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              ) : skuImageBrowserSkuId.trim() ? (
-                <p className="mt-4 text-sm text-slate-400">No hay imágenes asociadas para este SKU todavía.</p>
-              ) : (
-                <p className="mt-4 text-sm text-slate-400">Elige un SKU arriba para ver su dataset visual sin salir de esta pantalla.</p>
-              )}
-
-              {selectedSkuImageDetail ? (
-                <div className="mt-4 rounded-lg border border-cyan-300/20 bg-cyan-500/5 p-3">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                  <p className="text-sm font-semibold">Detalle de imagen SKU</p>
-                    <Button variant="outline" size="sm" onClick={() => setSelectedSkuImageDetail(null)}>Cerrar detalle</Button>
-                  </div>
-                  <div className="mt-3 grid gap-4 md:grid-cols-[220px_1fr]">
-                    <div>
-                      {previewUrlOf(selectedSkuImageDetail as Record<string, unknown>) ? (
-                        // eslint-disable-next-line @next/next/no-img-element
-                        <img
-                          src={previewUrlOf(selectedSkuImageDetail as Record<string, unknown>) ?? ""}
-                          alt={`Detalle ${String(selectedSkuImageDetail.image_id ?? selectedSkuImageDetail.id ?? "-")}`}
-                          className="h-52 w-full rounded-md object-cover"
-                        />
-                      ) : (
-                        <div className="flex h-52 items-center justify-center rounded-md border border-dashed border-white/10 text-xs text-slate-400">
-                          Sin preview
-                        </div>
-                      )}
-                    </div>
-                    <div className="space-y-2">
-                      <pre className="max-h-72 overflow-auto rounded-md border border-white/10 bg-black/20 p-3 text-xs">
-                        {JSON.stringify(selectedSkuImageDetail, null, 2)}
-                      </pre>
-                    </div>
-                  </div>
-                </div>
-              ) : null}
             </div>
             </>
             ) : null}
 
-            {skuDeleteDialogOpen ? (
+            {skuWorkspaceTab === "dataset" ? (
+            <>
+            <div className="rounded-xl border border-cyan-300/20 bg-gradient-to-br from-cyan-500/10 via-slate-950/60 to-slate-950/80 p-4">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <p className="text-sm font-semibold text-slate-100">Dataset activo · browser del catálogo visual</p>
+                  <p className="text-xs text-slate-300">Explora imágenes asociadas e indexables vía dataset/summary. El estado de embeddings por imagen viene de GET …/images (embedding_status canónico).</p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Badge variant="outline">{datasetAccountTotals.skusWithImages} SKUs con imágenes</Badge>
+                  <Badge variant="outline">{datasetAccountTotals.images} imágenes totales</Badge>
+                  <Badge variant={datasetPublishPending ? "secondary" : "outline"}>{datasetPublishPending ? "Índice pendiente" : "Índice al día"}</Badge>
+                  <Button variant="outline" size="sm" onClick={() => { accountDatasetCoverageQuery.refetch(); datasetSummaryQuery.refetch(); skusQuery.refetch(); }} disabled={accountDatasetCoverageQuery.isFetching}>
+                    Refrescar dataset
+                  </Button>
+                  <Button size="sm" onClick={() => rebuildIndexMutation.mutate()} disabled={rebuildIndexMutation.isPending}>
+                    Publicar índice
+                  </Button>
+                </div>
+              </div>
+              <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+                <div className="rounded-lg border border-white/10 bg-black/20 p-3">
+                  <p className="text-xs text-slate-400">SKUs en catálogo</p>
+                  <p className="mt-1 text-lg font-semibold text-slate-100">{filteredSkusCatalog.length}</p>
+                  <p className="mt-1 text-xs text-slate-400">{datasetAccountTotals.skusWithoutImages} sin imágenes</p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/20 p-3">
+                  <p className="text-xs text-slate-400">Imágenes indexables</p>
+                  <p className="mt-1 text-lg font-semibold text-slate-100">{datasetAccountTotals.indexable}</p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/20 p-3">
+                  <p className="text-xs text-slate-400">dinov2 · sample_dim</p>
+                  <p className="mt-1 text-sm font-semibold text-slate-100">{vectorIndexHealth.dinov2.sampleDim ?? "-"}</p>
+                  <Badge className="mt-2" variant={vectorIndexHealth.dinov2.sampleDim !== null && vectorIndexHealth.dinov2.sampleDim >= 512 ? "default" : "secondary"}>{vectorIndexHealth.dinov2.status}</Badge>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/20 p-3">
+                  <p className="text-xs text-slate-400">siglip · sample_dim</p>
+                  <p className="mt-1 text-sm font-semibold text-slate-100">{vectorIndexHealth.siglip.sampleDim ?? "-"}</p>
+                  <Badge className="mt-2" variant={vectorIndexHealth.siglip.sampleDim !== null && vectorIndexHealth.siglip.sampleDim >= 512 ? "default" : "secondary"}>{vectorIndexHealth.siglip.status}</Badge>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-black/20 p-3">
+                  <p className="text-xs text-slate-400">SKU seleccionado</p>
+                  <p className="mt-1 font-mono text-sm text-slate-100">{activeSkuWorkspaceId || "—"}</p>
+                  <p className="mt-1 text-xs text-slate-400">
+                    {activeSkuDatasetSummaryLoading
+                      ? "Cargando resumen…"
+                      : activeSkuDatasetSummary
+                        ? `${activeSkuDatasetSummary.total_images} asociadas · ${activeSkuDatasetSummary.indexable_images} indexables`
+                        : `${currentSkuImageSummary.active} activas en galería`}
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-white/10 bg-black/20 p-4">
+              <p className="text-sm font-semibold text-slate-100">Buscar y filtrar catálogo</p>
+              <div className="mt-3 grid gap-3 xl:grid-cols-[1.5fr_auto_auto]">
+                <Input value={skuCatalogSearch} onChange={(e) => setSkuCatalogSearch(e.target.value)} placeholder="Buscar SKU, nombre, marca, categoría, fabricante..." />
+                <select className="h-10 rounded-md border border-white/10 bg-slate-900 px-3 text-sm" value={String(skuCatalogPageSize)} onChange={(e) => setSkuCatalogPageSize(Number(e.target.value))}>
+                  <option value="12">12 / página</option>
+                  <option value="24">24 / página</option>
+                  <option value="48">48 / página</option>
+                </select>
+                <div className="flex items-center justify-center rounded-md border border-white/10 bg-slate-950/40 px-3 text-sm text-slate-300">Pág. {skuCatalogPage}/{datasetCatalogTotalPages}</div>
+              </div>
+              <div className="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                <select className="h-10 rounded-md border border-white/10 bg-slate-900 px-3 text-sm" value={skuCatalogCategoryFilter} onChange={(e) => setSkuCatalogCategoryFilter(e.target.value)}>
+                  <option value="">Todas las categorías</option>
+                  {skuCatalogOptions.categories.map((value) => <option key={`ds-cat-${value}`} value={value}>{value}</option>)}
+                </select>
+                <select className="h-10 rounded-md border border-white/10 bg-slate-900 px-3 text-sm" value={skuCatalogSubcategoryFilter} onChange={(e) => setSkuCatalogSubcategoryFilter(e.target.value)}>
+                  <option value="">Todas las subcategorías</option>
+                  {skuCatalogOptions.subcategories.map((value) => <option key={`ds-sub-${value}`} value={value}>{value}</option>)}
+                </select>
+                <select className="h-10 rounded-md border border-white/10 bg-slate-900 px-3 text-sm" value={skuCatalogBrandFilter} onChange={(e) => setSkuCatalogBrandFilter(e.target.value)}>
+                  <option value="">Todas las marcas</option>
+                  {skuCatalogOptions.brands.map((value) => <option key={`ds-brand-${value}`} value={value}>{value}</option>)}
+                </select>
+                <select className="h-10 rounded-md border border-white/10 bg-slate-900 px-3 text-sm" value={skuCatalogManufacturerFilter} onChange={(e) => setSkuCatalogManufacturerFilter(e.target.value)}>
+                  <option value="">Todos los fabricantes</option>
+                  {skuCatalogOptions.manufacturers.map((value) => <option key={`ds-man-${value}`} value={value}>{value}</option>)}
+                </select>
+              </div>
+              <div className="mt-3 flex flex-wrap gap-2">
+                {([
+                  ["all", "Todos"],
+                  ["with_images", "Con imágenes"],
+                  ["without_images", "Sin imágenes"],
+                  ["indexable", "Indexables"],
+                ] as const).map(([key, label]) => (
+                  <Button key={`ds-cov-${key}`} size="sm" variant={datasetCoverageFilter === key ? "default" : "outline"} onClick={() => setDatasetCoverageFilter(key)}>{label}</Button>
+                ))}
+                <label className="ml-auto flex items-center gap-2 rounded-md border border-white/10 bg-slate-950/40 px-3 text-sm text-slate-200">
+                  <Switch checked={skuCatalogOnlyActive} onCheckedChange={setSkuCatalogOnlyActive} />
+                  Solo activos
+                </label>
+              </div>
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400">
+                <span>{paginatedDatasetSkus.length} de {filteredDatasetSkus.length} SKUs visibles</span>
+                <div className="flex gap-2">
+                  <Button size="sm" variant="outline" onClick={() => setSkuCatalogPage((p) => Math.max(1, p - 1))} disabled={skuCatalogPage <= 1}>Anterior</Button>
+                  <Button size="sm" variant="outline" onClick={() => setSkuCatalogPage((p) => Math.min(datasetCatalogTotalPages, p + 1))} disabled={skuCatalogPage >= datasetCatalogTotalPages}>Siguiente</Button>
+                </div>
+              </div>
+            </div>
+
+            <div className="grid gap-4 xl:grid-cols-[minmax(280px,340px)_minmax(0,1fr)]">
+              <div className="max-h-[72vh] overflow-y-auto rounded-xl border border-white/10 bg-slate-950/50 p-2">
+                <p className="sticky top-0 z-10 border-b border-white/10 bg-slate-950/95 px-2 py-2 text-xs font-semibold uppercase tracking-wide text-slate-400">Catálogo · cobertura dataset</p>
+                <div className="space-y-2 p-1">
+                  {paginatedDatasetSkus.map((sku, idx) => {
+                    const code = getSkuCodeValue(sku);
+                    const coverage = resolveSkuDatasetCoverage(sku);
+                    const selected = code === activeSkuWorkspaceId;
+                    const imageCount = coverage.images;
+                    const indexableCount = coverage.indexable;
+                    const coverageSummaryPending = (
+                      imageCount === 0
+                      && indexableCount === 0
+                      && (
+                        datasetPageSummaryQueries[idx]?.isFetching
+                        || (accountDatasetCoverageQuery.isFetching && !accountDatasetCoverageQuery.data)
+                      )
+                    );
+                    return (
+                      <button
+                        key={`ds-sku-${code || sku.id}`}
+                        type="button"
+                        onClick={() => code && selectDatasetSku(code)}
+                        className={`w-full rounded-lg border p-3 text-left transition ${selected ? "border-cyan-300/40 bg-cyan-500/10 ring-1 ring-cyan-400/20" : "border-white/10 bg-black/20 hover:bg-black/30"}`}
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <p className="font-mono text-sm text-slate-100">{code || "—"}</p>
+                          <Badge variant={imageCount > 0 ? "default" : "secondary"}>{coverageSummaryPending ? "…" : `${imageCount} img`}</Badge>
+                        </div>
+                        <p className="mt-1 line-clamp-2 text-xs text-slate-300">{getSkuNameValue(sku) || "Sin nombre"}</p>
+                        <div className="mt-2 flex flex-wrap gap-1 text-[10px] text-slate-400">
+                          {getSkuBrandValue(sku) ? <span>{getSkuBrandValue(sku)}</span> : null}
+                          {getSkuFamilyValue(sku) ? <span>· {getSkuFamilyValue(sku)}</span> : null}
+                        </div>
+                        <div className="mt-2 flex flex-wrap gap-1">
+                          {coverageSummaryPending ? (
+                            <Badge variant="outline" className="text-[10px]">indexables …</Badge>
+                          ) : indexableCount > 0 ? (
+                            <Badge variant="outline" className="text-[10px]">{indexableCount} indexables</Badge>
+                          ) : imageCount > 0 ? (
+                            <Badge variant="secondary" className="text-[10px]">0 indexables</Badge>
+                          ) : (
+                            <Badge variant="secondary" className="text-[10px]">sin imágenes</Badge>
+                          )}
+                          {getSkuSubcategoryValue(sku) ? <Badge variant="outline" className="text-[10px]">{getSkuSubcategoryValue(sku)}</Badge> : null}
+                        </div>
+                      </button>
+                    );
+                  })}
+                  {!paginatedDatasetSkus.length ? (
+                    <p className="px-2 py-6 text-center text-sm text-slate-400">Ningún SKU coincide con los filtros actuales.</p>
+                  ) : null}
+                </div>
+              </div>
+
+              <div className="space-y-4">
+                {!activeSkuWorkspaceId ? (
+                  <div className="flex min-h-[320px] flex-col items-center justify-center rounded-xl border border-dashed border-white/15 bg-black/20 p-8 text-center">
+                    <p className="text-sm font-semibold text-slate-200">Selecciona un SKU de la lista</p>
+                    <p className="mt-2 max-w-md text-xs text-slate-400">Verás imágenes asociadas, roles de dataset, conteos indexables desde dataset/summary y podrás registrar confusiones frecuentes en el mismo flujo.</p>
+                  </div>
+                ) : (
+                  <>
+                  <div className="rounded-xl border border-cyan-300/20 bg-cyan-500/5 p-4">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div>
+                        <p className="font-mono text-base text-slate-100">{getSkuCodeValue(activeSkuWorkspaceInfo ?? {})}</p>
+                        <p className="mt-1 text-sm text-slate-200">{getSkuNameValue(activeSkuWorkspaceInfo ?? {}) || "Sin nombre"}</p>
+                        <p className="mt-1 text-xs text-slate-400">{getSkuBrandValue(activeSkuWorkspaceInfo ?? {}) || "-"} · {getSkuFamilyValue(activeSkuWorkspaceInfo ?? {}) || "-"} · {getSkuSubcategoryValue(activeSkuWorkspaceInfo ?? {}) || "-"}</p>
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        <Badge variant="outline">
+                          {activeSkuDatasetSummaryLoading ? "Imágenes …" : `${activeSkuDatasetSummary?.total_images ?? "—"} imágenes asociadas`}
+                        </Badge>
+                        <Badge variant="default">
+                          {activeSkuDatasetSummaryLoading ? "Indexables …" : `${activeSkuDatasetSummary?.indexable_images ?? "—"} indexables`}
+                        </Badge>
+                        <Badge variant="outline">Índice dinov2: {vectorIndexHealth.dinov2.status}</Badge>
+                        <Badge variant="outline">Índice siglip: {vectorIndexHealth.siglip.status}</Badge>
+                        <Badge variant="outline">{(hardNegativesQuery.data ?? []).length} confusiones</Badge>
+                        <Button size="sm" variant="outline" onClick={() => { skuImagesQuery.refetch(); datasetSummaryQuery.refetch(); accountDatasetCoverageQuery.refetch(); versionsQuery.refetch(); }} disabled={skuImagesQuery.isFetching}>Actualizar</Button>
+                      </div>
+                    </div>
+                    <div className="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                      <div className="rounded-lg border border-white/10 bg-black/20 p-3 text-xs text-slate-300">
+                        <p className="font-medium text-slate-100">Imágenes asociadas</p>
+                        <p className="mt-1 text-lg font-semibold text-slate-100">{activeSkuDatasetSummary?.total_images ?? (activeSkuDatasetSummaryLoading ? "…" : "—")}</p>
+                        <p className="mt-1">Fuente: <span className="font-mono">dataset/summary</span></p>
+                      </div>
+                      <div className="rounded-lg border border-white/10 bg-black/20 p-3 text-xs text-slate-300">
+                        <p className="font-medium text-slate-100">Imágenes indexables</p>
+                        <p className="mt-1 text-lg font-semibold text-slate-100">{activeSkuDatasetSummary?.indexable_images ?? (activeSkuDatasetSummaryLoading ? "…" : "—")}</p>
+                        <p className="mt-1">Indexable ≠ embedding confirmado</p>
+                      </div>
+                      <div className="rounded-lg border border-white/10 bg-black/20 p-3 text-xs text-slate-300">
+                        <p className="font-medium text-slate-100">Galería local</p>
+                        <p className="mt-1 text-lg font-semibold text-slate-100">{currentSkuImageSummary.total}</p>
+                        <p className="mt-1">{currentSkuImageSummary.active} activas · {currentSkuImageSummary.inactive} inactivas</p>
+                      </div>
+                      <div className="rounded-lg border border-white/10 bg-black/20 p-3 text-xs text-slate-300">
+                        <p className="font-medium text-slate-100">Embeddings por imagen</p>
+                        {skuImagesQuery.isLoading || skuImagesQuery.isFetching ? (
+                          <p className="mt-1 text-sm text-slate-200">Cargando estado…</p>
+                        ) : activeSkuEmbeddingSummary.available ? (
+                          <>
+                            <p className="mt-1 text-lg font-semibold text-slate-100">{activeSkuEmbeddingSummary.complete} completas</p>
+                            <p className="mt-1">
+                              {[
+                                activeSkuEmbeddingSummary.partial > 0 ? `${activeSkuEmbeddingSummary.partial} parciales` : "",
+                                activeSkuEmbeddingSummary.pending > 0 ? `${activeSkuEmbeddingSummary.pending} pendientes` : "",
+                                activeSkuEmbeddingSummary.fallback > 0 ? `${activeSkuEmbeddingSummary.fallback} degradadas` : "",
+                                activeSkuEmbeddingSummary.failed > 0 ? `${activeSkuEmbeddingSummary.failed} fallidas` : "",
+                                activeSkuEmbeddingSummary.notIndexable > 0 ? `${activeSkuEmbeddingSummary.notIndexable} no indexables` : "",
+                              ].filter(Boolean).join(" · ") || "Sin incidencias reportadas"}
+                            </p>
+                            <p className="mt-1">Fuente: <span className="font-mono">GET …/images</span></p>
+                          </>
+                        ) : (
+                          <>
+                            <p className="mt-1 text-sm text-slate-200">Sin embedding_status en la galería</p>
+                            <p className="mt-1">Refresca o verifica que backend esté desplegado.</p>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                    {(datasetSummaryQuery.data?.by_role ?? []).length ? (
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {(datasetSummaryQuery.data?.by_role ?? []).map((item, idx) => (
+                          <Badge key={`ds-role-${idx}`} variant="outline">{String(item.dataset_role ?? "-")}: {String(item.count ?? 0)}</Badge>
+                        ))}
+                      </div>
+                    ) : null}
+                    {datasetPublishPending && (activeSkuDatasetSummary?.indexable_images ?? 0) > 0 ? (
+                      <div className="mt-3 rounded-lg border border-cyan-300/25 bg-cyan-500/10 p-3 text-xs text-cyan-50">
+                        <p className="font-medium text-cyan-100">Acción operativa: publicar índice</p>
+                        <p className="mt-1">
+                          Hay cambios pendientes de publicación. Esto no implica que falten embeddings; solo sincroniza el índice vectorial con el dataset actual.
+                        </p>
+                      </div>
+                    ) : null}
+                  </div>
+
+                  <div className="rounded-xl border border-white/10 bg-black/20 p-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <p className="text-sm font-semibold text-slate-100">Galería del dataset ({filteredDatasetImages.length}/{skuImagesQuery.data?.length ?? 0})</p>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <select className="h-9 rounded-md border border-white/10 bg-slate-900 px-2 text-xs" value={datasetImageRoleFilter} onChange={(e) => setDatasetImageRoleFilter(e.target.value)}>
+                          <option value="all">Todos los roles</option>
+                          {SHELF_DATASET_ROLE_OPTIONS.map((role) => <option key={`ds-img-role-${role}`} value={role}>{role}</option>)}
+                        </select>
+                        <select className="h-9 rounded-md border border-white/10 bg-slate-900 px-2 text-xs" value={datasetImageIndexableFilter} onChange={(e) => setDatasetImageIndexableFilter(e.target.value as typeof datasetImageIndexableFilter)}>
+                          <option value="all">Todas (indexabilidad)</option>
+                          <option value="indexable">Solo indexables</option>
+                          <option value="non_indexable">No indexables</option>
+                        </select>
+                        <label className="flex items-center gap-2 text-xs text-slate-300">
+                          <Switch checked={skuImageBrowserIncludeInactive} onCheckedChange={setSkuImageBrowserIncludeInactive} />
+                          Inactivas
+                        </label>
+                      </div>
+                    </div>
+                    {skuImagesQuery.isLoading ? <p className="mt-4 text-sm text-slate-400">Cargando imágenes del SKU...</p> : null}
+                    {skuImagesQuery.isFetching && !skuImagesQuery.isLoading ? <p className="mt-2 text-xs text-cyan-200">Actualizando galería...</p> : null}
+                    {filteredDatasetImages.length ? (
+                      <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                        {filteredDatasetImages.map((image, idx) => {
+                          const preview = previewUrlOf(image as Record<string, unknown>);
+                          const imageId = image.image_id ?? image.id ?? idx;
+                          const row = image as Record<string, unknown>;
+                          const indexableMeta = imageIndexableMeta(row);
+                          const embeddingStatus = imageEmbeddingStatusFromBackend(row);
+                          const roleDraftKey = `${skuImageBrowserSkuId.trim()}::${String(imageId)}`;
+                          const currentDatasetRole = firstNonEmptyString(row.dataset_role) || "reference_active";
+                          const currentDatasetSplit = firstNonEmptyString(row.dataset_split);
+                          const roleDraft = imageRoleDrafts[roleDraftKey] ?? { dataset_role: currentDatasetRole as ShelfDatasetRole, dataset_split: currentDatasetSplit };
+                          const isActive = image.is_active !== false && image.is_active !== 0;
+                          return (
+                            <div key={`ds-img-${imageId}`} className={`rounded-lg border p-3 ${isActive ? "border-white/10 bg-slate-950/40" : "border-amber-300/20 bg-amber-500/5"}`}>
+                              <div className="mb-2 flex flex-wrap gap-1">
+                                <Badge variant={indexableMeta.tone}>{indexableMeta.label}</Badge>
+                                <Badge variant="outline">{currentDatasetRole}</Badge>
+                                {embeddingStatus ? <Badge variant={embeddingStatus.tone}>{embeddingStatus.label}</Badge> : null}
+                                {!isActive ? <Badge variant="secondary">inactiva</Badge> : null}
+                              </div>
+                              {previewAvailableOf(row) && preview ? (
+                                // eslint-disable-next-line @next/next/no-img-element
+                                <img src={preview} alt={`img-${imageId}`} className="h-44 w-full rounded-md object-contain bg-slate-950" />
+                              ) : (
+                                <div className="flex h-44 items-center justify-center rounded-md border border-dashed border-white/10 text-xs text-slate-400">Sin preview</div>
+                              )}
+                              <p className="mt-2 font-mono text-[11px] text-slate-400">#{String(imageId)}</p>
+                              <div className="mt-2 grid gap-2">
+                                <select className="h-9 w-full rounded-md border border-white/10 bg-slate-900 px-2 text-xs" value={roleDraft.dataset_role} onChange={(e) => setImageRoleDrafts((prev) => ({ ...prev, [roleDraftKey]: { dataset_role: e.target.value as ShelfDatasetRole, dataset_split: roleDraft.dataset_split } }))}>
+                                  {SHELF_DATASET_ROLE_OPTIONS.map((role) => <option key={`r-${imageId}-${role}`} value={role}>{role}</option>)}
+                                </select>
+                                <Input className="h-9 text-xs" value={roleDraft.dataset_split} onChange={(e) => setImageRoleDrafts((prev) => ({ ...prev, [roleDraftKey]: { dataset_role: roleDraft.dataset_role, dataset_split: e.target.value } }))} placeholder="split opcional" />
+                              </div>
+                              <div className="mt-2 flex flex-wrap gap-1">
+                                <Button size="sm" variant="outline" onClick={() => getSkuImageDetailMutation.mutate({ skuId: skuImageBrowserSkuId.trim(), imageId })}>Detalle</Button>
+                                <Button size="sm" variant="outline" onClick={() => patchShelfImageRoleMutation.mutate({ skuId: skuImageBrowserSkuId.trim(), imageId, dataset_role: roleDraft.dataset_role, dataset_split: roleDraft.dataset_split })}>Guardar rol</Button>
+                                <Button size="sm" variant="ghost" onClick={() => { setDatasetToolsExpanded(true); setHardNegativeNote(`Confusión visual con imagen ${imageId}`); }}>→ Confusión</Button>
+                                <Button size="sm" variant="ghost" onClick={() => deleteSkuImageMutation.mutate({ skuId: skuImageBrowserSkuId.trim(), imageId })}>Desactivar</Button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : skuImageBrowserSkuId.trim() ? (
+                      <p className="mt-4 text-sm text-slate-400">Este SKU no tiene imágenes para los filtros actuales.</p>
+                    ) : null}
+                  </div>
+
+                  <details className="rounded-xl border border-white/10 bg-black/20 p-3" open={datasetToolsExpanded} onToggle={(e) => setDatasetToolsExpanded((e.currentTarget as HTMLDetailsElement).open)}>
+                    <summary className="cursor-pointer text-sm font-semibold text-slate-100">Confusiones frecuentes y herramientas avanzadas</summary>
+                    <div className="mt-4 space-y-4">
+                      <p className="text-xs text-slate-400">
+                        Registra SKUs que se parecen pero no son el correcto. Esto no reasigna imágenes ni mueve el dataset — solo guarda la relación de confusión (hard negative).
+                      </p>
+                      <div className="grid gap-3 md:grid-cols-3">
+                        <div><Label>SKU correcto (ancla)</Label><Input value={hardNegativeSkuId} onChange={(e) => { setHardNegativeSkuId(e.target.value); setDatasetSummarySkuId(e.target.value); }} /></div>
+                        <div><Label>SKU parecido pero incorrecto</Label><Input value={hardNegativeTargetSkuId} onChange={(e) => setHardNegativeTargetSkuId(e.target.value)} placeholder="SKU que suele confundirse" /></div>
+                        <div><Label>Motivo técnico</Label><Input value={hardNegativeReason} onChange={(e) => setHardNegativeReason(e.target.value)} /></div>
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        <Input className="max-w-xl" value={hardNegativeNote} onChange={(e) => setHardNegativeNote(e.target.value)} placeholder="Nota: mismo packaging, color similar..." />
+                        <Button onClick={() => createHardNegativeMutation.mutate()} disabled={createHardNegativeMutation.isPending || !hardNegativeSkuId.trim() || !hardNegativeTargetSkuId.trim()}>Guardar confusión frecuente</Button>
+                      </div>
+                      <div>
+                        <p className="text-sm font-medium text-slate-100">Confusiones registradas: {(hardNegativesQuery.data ?? []).length}</p>
+                        {(hardNegativesQuery.data ?? []).length ? (
+                          <div className="mt-2 grid gap-2 md:grid-cols-2">
+                            {(hardNegativesQuery.data ?? []).map((item, idx) => (
+                              <div key={`hn-${idx}`} className="rounded-md border border-white/10 bg-slate-950/40 px-3 py-2 text-sm">
+                                <p className="font-mono text-slate-100">{String(item.negative_sku_id ?? item.negative_sku_code ?? "-")}</p>
+                                <p className="mt-1 text-xs text-slate-400">{String(item.reason ?? "-")} · {String(item.note ?? "")}</p>
+                              </div>
+                            ))}
+                          </div>
+                        ) : <p className="mt-1 text-xs text-slate-400">Sin confusiones registradas para este SKU.</p>}
+                      </div>
+
+                      <details className="rounded-lg border border-amber-300/20 bg-amber-500/5 p-3">
+                        <summary className="cursor-pointer text-sm font-medium text-slate-200">Recalcular embeddings del SKU (acción manual opcional)</summary>
+                        <div className="mt-3 grid gap-3 xl:grid-cols-3">
+                          <Textarea value={recomputeImageIdsText} onChange={(e) => setRecomputeImageIdsText(e.target.value)} rows={4} placeholder="image_ids (vacío = todo el SKU)" />
+                          <Textarea value={recomputeModelNamesText} onChange={(e) => setRecomputeModelNamesText(e.target.value)} rows={4} />
+                          <div className="space-y-2">
+                            <Button size="sm" variant="outline" onClick={() => setRecomputeImageIdsText(currentSkuImageIds.map(String).join("\n"))} disabled={!currentSkuImageIds.length}>Usar imágenes actuales</Button>
+                            <label className="flex items-center gap-2 text-xs"><Switch checked={recomputeRebuildIndex} onCheckedChange={setRecomputeRebuildIndex} />rebuild_index</label>
+                            <Button onClick={() => recomputeEmbeddingsMutation.mutate()} disabled={recomputeEmbeddingsMutation.isPending}>Recalcular</Button>
+                          </div>
+                        </div>
+                        {lastEmbeddingsRecompute ? (
+                          <div className="mt-3 flex flex-wrap gap-2 text-xs">
+                            <Badge variant="outline">OK {percentLabel(recomputeSummary.successRate)}</Badge>
+                            <Badge variant="outline">fallback {percentLabel(recomputeSummary.fallbackRate)}</Badge>
+                            <Badge variant={diagnosticsEmbeddingTone(lastEmbeddingsRecompute.diagnostics ?? null)}>{diagnosticsEmbeddingUiLabel(lastEmbeddingsRecompute.diagnostics ?? null)}</Badge>
+                          </div>
+                        ) : null}
+                      </details>
+                    </div>
+                  </details>
+
+                  {selectedSkuImageDetail ? (
+                    <div className="rounded-lg border border-cyan-300/20 bg-cyan-500/5 p-3">
+                      <div className="flex items-center justify-between gap-2">
+                        <p className="text-sm font-semibold">Detalle imagen #{String(selectedSkuImageDetail.image_id ?? selectedSkuImageDetail.id ?? "-")}</p>
+                        <Button variant="outline" size="sm" onClick={() => setSelectedSkuImageDetail(null)}>Cerrar</Button>
+                      </div>
+                      <div className="mt-3 grid gap-4 md:grid-cols-[220px_1fr]">
+                        {previewUrlOf(selectedSkuImageDetail as Record<string, unknown>) ? (
+                          // eslint-disable-next-line @next/next/no-img-element
+                          <img src={previewUrlOf(selectedSkuImageDetail as Record<string, unknown>) ?? ""} alt="detalle" className="h-52 w-full rounded-md object-contain bg-slate-950" />
+                        ) : null}
+                        <div className="space-y-3 text-xs text-slate-300">
+                          {(() => {
+                            const detailRow = selectedSkuImageDetail as Record<string, unknown>;
+                            const embeddingBadge = imageEmbeddingStatusFromBackend(detailRow);
+                            const diagSummary = imageEmbeddingDiagnosticsSummary(detailRow);
+                            return (
+                              <>
+                                <div className="flex flex-wrap gap-1">
+                                  {embeddingBadge ? <Badge variant={embeddingBadge.tone}>{embeddingBadge.label}</Badge> : null}
+                                  {firstNonEmptyString(detailRow.embedding_status) ? (
+                                    <Badge variant="outline">{String(detailRow.embedding_status)}</Badge>
+                                  ) : null}
+                                </div>
+                                {Array.isArray(detailRow.embedding_models) && detailRow.embedding_models.length ? (
+                                  <p><span className="text-slate-400">Modelos:</span> {(detailRow.embedding_models as string[]).join(", ")}</p>
+                                ) : null}
+                                {Array.isArray(detailRow.embedding_ids) && detailRow.embedding_ids.length ? (
+                                  <p className="font-mono text-[11px] break-all"><span className="text-slate-400">IDs:</span> {(detailRow.embedding_ids as string[]).join(", ")}</p>
+                                ) : null}
+                                {diagSummary ? (
+                                  <div className="rounded-md border border-white/10 bg-black/20 p-2">
+                                    <p className="font-medium text-slate-100">embedding_diagnostics_summary</p>
+                                    <p className="mt-1">expected: {Array.isArray(diagSummary.expected_models) ? (diagSummary.expected_models as string[]).join(", ") : "—"}</p>
+                                    <p>available: {Array.isArray(diagSummary.available_models) ? (diagSummary.available_models as string[]).join(", ") : "—"}</p>
+                                    <p>missing: {Array.isArray(diagSummary.missing_models) && (diagSummary.missing_models as string[]).length ? (diagSummary.missing_models as string[]).join(", ") : "—"}</p>
+                                  </div>
+                                ) : null}
+                              </>
+                            );
+                          })()}
+                          <pre className="max-h-48 overflow-auto rounded-md border border-white/10 bg-black/20 p-3 text-xs">{JSON.stringify(selectedSkuImageDetail, null, 2)}</pre>
+                        </div>
+                      </div>
+                    </div>
+                  ) : null}
+                  </>
+                )}
+              </div>
+            </div>
+            </>
+            ) : null}            {skuDeleteDialogOpen ? (
               <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4">
                 <div className="max-h-[90vh] w-full max-w-5xl overflow-auto rounded-2xl border border-white/10 bg-slate-950 shadow-2xl">
                   <div className="sticky top-0 z-10 flex items-center justify-between gap-3 border-b border-white/10 bg-slate-950/95 px-5 py-4 backdrop-blur">
@@ -6436,38 +7696,93 @@ export function AccountShelfPage({ account }: Props) {
       ) : null}
 
       {tab === "assets" ? (
-        <Card className="border-white/10 bg-white/5">
-          <CardHeader><CardTitle>Assets de entrenamiento</CardTitle></CardHeader>
-          <CardContent className="space-y-4">
-            <div className="rounded-lg border border-cyan-300/20 bg-cyan-500/5 p-4">
-              <p className="text-sm font-semibold">Cómo trabajar un SKU de punta a punta</p>
-              <div className="mt-3 grid gap-3 md:grid-cols-4">
-                <div className="rounded-lg border border-white/10 bg-black/20 p-3">
-                  <p className="text-xs text-slate-400">1. Preparar</p>
-                  <p className="mt-1 text-sm text-slate-100">Sube assets por subcategoría cuando aún estás armando la biblioteca visual. Si ya sabes el SKU, puedes saltar directo a la pestaña SKUs.</p>
+        <div className="space-y-4">
+            <div className="rounded-xl border border-amber-300/20 bg-gradient-to-br from-amber-500/10 via-slate-950/60 to-slate-950/80 p-4">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <p className="text-sm font-semibold text-slate-100">Assets · biblioteca visual previa al dataset</p>
+                  <p className="text-xs text-slate-300">Sube imágenes por subcategoría, revísalas en el browser y adjúntalas al SKU cuando estés listo para entrar al dataset real.</p>
                 </div>
-                <div className="rounded-lg border border-white/10 bg-black/20 p-3">
-                  <p className="text-xs text-slate-400">2. Asociar</p>
-                  <p className="mt-1 text-sm text-slate-100">Adjunta imágenes al SKU. Eso crea la base visual que luego entra a embeddings e índice vectorial.</p>
-                </div>
-                <div className="rounded-lg border border-white/10 bg-black/20 p-3">
-                  <p className="text-xs text-slate-400">3. Revisar</p>
-                  <p className="mt-1 text-sm text-slate-100">Abre el browser de imágenes por SKU para confirmar que el dataset quedó bien y desactivar imágenes malas.</p>
-                </div>
-                <div className="rounded-lg border border-white/10 bg-black/20 p-3">
-                  <p className="text-xs text-slate-400">4. Probar</p>
-                  <p className="mt-1 text-sm text-slate-100">Reconstruye índice y luego crea un Shelf Job para probar reconocimiento real. Los logs visibles aquí son diagnostics, events y metrics.</p>
+                <div className="flex flex-wrap gap-2">
+                  <Badge variant="outline">{assetsSummary.total} visibles</Badge>
+                  <Badge variant="outline">{assetsSummary.active} activos</Badge>
+                  <Badge variant="outline">{assetsSummary.withSku} con sku sugerido</Badge>
+                  <Badge variant="secondary">Destino: {selectedSkuId || assetUploadSkuId || "—"}</Badge>
+                  <Button variant="outline" size="sm" onClick={() => assetsQuery.refetch()} disabled={assetsQuery.isFetching}>Refrescar</Button>
+                  <Button size="sm" variant="outline" onClick={() => rebuildIndexMutation.mutate()} disabled={rebuildIndexMutation.isPending}>Publicar índice</Button>
                 </div>
               </div>
             </div>
 
-            <div className="rounded-lg border border-white/10 bg-black/20 p-3">
+            <details className="rounded-xl border border-white/10 bg-black/20 p-3">
+              <summary className="cursor-pointer text-sm font-semibold text-slate-200">Flujo recomendado · preparar → asociar → revisar → probar</summary>
+              <div className="mt-3 grid gap-3 md:grid-cols-4">
+                <div className="rounded-lg border border-white/10 bg-slate-950/40 p-3">
+                  <p className="text-xs text-slate-400">1. Preparar</p>
+                  <p className="mt-1 text-sm text-slate-100">Sube assets por subcategoría cuando aún estás armando la biblioteca visual.</p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-slate-950/40 p-3">
+                  <p className="text-xs text-slate-400">2. Asociar</p>
+                  <p className="mt-1 text-sm text-slate-100">Adjunta al SKU destino para crear la base visual del dataset.</p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-slate-950/40 p-3">
+                  <p className="text-xs text-slate-400">3. Revisar</p>
+                  <p className="mt-1 text-sm text-slate-100">Confirma imágenes en SKUs → Dataset activo.</p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-slate-950/40 p-3">
+                  <p className="text-xs text-slate-400">4. Probar</p>
+                  <p className="mt-1 text-sm text-slate-100">Publica índice y lanza un Shelf Job de reconocimiento.</p>
+                </div>
+              </div>
+            </details>
+
+            <div className="grid gap-4 xl:grid-cols-[minmax(280px,320px)_minmax(0,1fr)]">
+              <div className="max-h-[72vh] overflow-y-auto rounded-xl border border-white/10 bg-slate-950/50 p-2">
+                <p className="sticky top-0 z-10 border-b border-white/10 bg-slate-950/95 px-2 py-2 text-xs font-semibold uppercase tracking-wide text-slate-400">SKU destino</p>
+                <div className="space-y-2 p-2">
+                  <Input
+                    value={assetSkuSearch}
+                    onChange={(e) => setAssetSkuSearch(e.target.value)}
+                    placeholder="Buscar SKU..."
+                    className="h-9 text-xs"
+                  />
+                  <Button variant="outline" size="sm" className="w-full" onClick={() => skusQuery.refetch()} disabled={skusQuery.isFetching}>Actualizar catálogo</Button>
+                  <div className="space-y-2">
+                    {filteredSkusForPicker.slice(0, 36).map((sku) => {
+                      const code = getSkuCodeValue(sku);
+                      const selected = code && code === (selectedSkuId || assetUploadSkuId);
+                      return (
+                        <button
+                          key={`asset-sku-${code}`}
+                          type="button"
+                          onClick={() => {
+                            setSelectedSkuId(code);
+                            setAssetUploadSkuId(code);
+                            setSkuImageBrowserSkuId(code);
+                          }}
+                          className={`w-full rounded-lg border p-2 text-left transition ${selected ? "border-amber-300/40 bg-amber-500/10 ring-1 ring-amber-400/20" : "border-white/10 bg-black/20 hover:bg-black/30"}`}
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <p className="font-mono text-xs text-slate-100">{code || "—"}</p>
+                            <Badge variant={selected ? "default" : "outline"} className="text-[10px]">{selected ? "destino" : "elegir"}</Badge>
+                          </div>
+                          <p className="mt-1 line-clamp-1 text-[11px] text-slate-400">{getSkuNameValue(sku) || "Sin nombre"}</p>
+                        </button>
+                      );
+                    })}
+                    {!filteredSkusForPicker.length ? <p className="py-4 text-center text-xs text-slate-400">Sin coincidencias.</p> : null}
+                  </div>
+                </div>
+              </div>
+
+              <div className="space-y-4">
+            <div className="rounded-xl border border-amber-300/20 bg-amber-500/5 p-4">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div>
-                  <p className="text-sm font-semibold">Biblioteca de assets previos</p>
-                  <p className="mt-1 text-xs text-slate-300">Úsala cuando quieres subir imágenes primero, revisarlas y recién después decidir a qué SKU adjuntarlas.</p>
+                  <p className="text-sm font-semibold text-slate-100">Subir assets</p>
+                  <p className="mt-1 text-xs text-slate-300">Carga por subcategoría. El SKU es opcional si solo quieres armar biblioteca.</p>
                 </div>
-                <Badge variant="outline">Archivos seleccionados: {selectedAssetFiles.length}</Badge>
+                <Badge variant="outline">Archivos: {selectedAssetFiles.length}</Badge>
               </div>
               <div className="mt-3 grid gap-3 md:grid-cols-4">
                 <div>
@@ -6496,62 +7811,16 @@ export function AccountShelfPage({ account }: Props) {
                 </Button>
               </div>
               <div className="mt-3 rounded-lg border border-white/10 bg-slate-950/40 p-3 text-xs text-slate-300">
-                <p><span className="font-medium text-slate-100">Cuándo usar esta carga:</span> cuando todavía estás preparando material visual y quieres ver miniaturas, filtrar y adjuntar más tarde.</p>
-                <p className="mt-1"><span className="font-medium text-slate-100">Cuándo no usarla:</span> si ya sabes el SKU y quieres que la imagen entre directo al dataset real. En ese caso usa la carga de la pestaña `SKUs`.</p>
+                <p><span className="font-medium text-slate-100">Cuándo usar esta carga:</span> biblioteca visual antes de asociar al SKU.</p>
+                <p className="mt-1"><span className="font-medium text-slate-100">Cuándo no:</span> carga directa al dataset → pestaña SKUs → Cargas.</p>
               </div>
             </div>
 
-            <div className="rounded-lg border border-white/10 bg-black/20 p-3">
+            <div className="rounded-xl border border-white/10 bg-black/20 p-4">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div>
-                  <p className="text-sm font-semibold">Selector de SKU</p>
-                  <p className="text-xs text-slate-300">Busca por código, nombre, marca o categoría y deja fijo el SKU destino para adjuntar assets sin perderte.</p>
-                </div>
-                <Badge variant="outline">SKU destino: {selectedSkuId || assetUploadSkuId || "no seleccionado"}</Badge>
-              </div>
-              <div className="mt-3 grid gap-3 md:grid-cols-[1fr_auto]">
-                <Input
-                  value={assetSkuSearch}
-                  onChange={(e) => setAssetSkuSearch(e.target.value)}
-                  placeholder="Buscar SKU por código, nombre, marca o categoría..."
-                />
-                <Button variant="outline" onClick={() => skusQuery.refetch()}>Actualizar SKUs</Button>
-              </div>
-              <div className="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                {filteredSkusForPicker.map((sku) => {
-                  const code = getSkuCodeValue(sku);
-                  const selected = code && code === (selectedSkuId || assetUploadSkuId);
-                  return (
-                    <button
-                      key={`sku-card-${code}`}
-                      type="button"
-                      onClick={() => {
-                        setSelectedSkuId(code);
-                        setAssetUploadSkuId(code);
-                        setSkuImageBrowserSkuId(code);
-                      }}
-                      className={`rounded-lg border p-3 text-left transition ${selected ? "border-cyan-300/40 bg-cyan-500/10" : "border-white/10 bg-slate-950/40 hover:bg-slate-900/50"}`}
-                    >
-                      <div className="flex items-center justify-between gap-2">
-                        <p className="font-mono text-sm text-slate-100">{code || "-"}</p>
-                        <Badge variant={selected ? "default" : "outline"}>{selected ? "Seleccionado" : "Elegir"}</Badge>
-                      </div>
-                      <p className="mt-2 text-sm text-slate-100">{getSkuNameValue(sku) || "Sin nombre"}</p>
-                      <div className="mt-2 flex flex-wrap gap-2 text-xs text-slate-300">
-                        {getSkuBrandValue(sku) ? <span>{getSkuBrandValue(sku)}</span> : null}
-                        {getSkuFamilyValue(sku) ? <span>{getSkuFamilyValue(sku)}</span> : null}
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            <div className="rounded-lg border border-white/10 bg-black/20 p-3">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div>
-                  <p className="text-sm font-semibold">Asset Browser</p>
-                  <p className="text-xs text-slate-300">Carga todos los assets por defecto. Usa filtros solo cuando quieras acotar la vista.</p>
+                  <p className="text-sm font-semibold text-slate-100">Asset browser</p>
+                  <p className="text-xs text-slate-300">Filtra la biblioteca y adjunta al SKU destino de la barra lateral.</p>
                 </div>
                 <div className="flex flex-wrap gap-2">
                   <Badge variant="outline">Assets visibles: {(assetsQuery.data ?? []).length}</Badge>
@@ -6643,25 +7912,44 @@ export function AccountShelfPage({ account }: Props) {
                   })}
                 </div>
               ) : (
-                <div className="mt-4 rounded-lg border border-dashed border-white/10 p-4 text-sm text-slate-400">
+                <div className="mt-4 flex min-h-[200px] flex-col items-center justify-center rounded-lg border border-dashed border-white/15 p-6 text-center text-sm text-slate-400">
                   <p>No hay assets para los filtros actuales.</p>
-                  <p className="mt-1 text-xs text-slate-500">Si acabas de entrar a la pestaña y esperabas ver todo, prueba `Limpiar filtros` o sube assets nuevos en el bloque superior.</p>
+                  <p className="mt-1 text-xs text-slate-500">Prueba Limpiar filtros o sube assets arriba.</p>
                 </div>
               )}
             </div>
-          </CardContent>
-        </Card>
+              </div>
+            </div>
+        </div>
       ) : null}
 
       {tab === "index" ? (
-        <Card className="border-white/10 bg-white/5">
-          <CardHeader><CardTitle>Índice vectorial, DINO/SigLIP y configuración</CardTitle></CardHeader>
-          <CardContent className="space-y-3">
-            <div className="flex flex-wrap gap-2">
-              <Button onClick={() => rebuildIndexMutation.mutate()} disabled={rebuildIndexMutation.isPending}>Reconstruir índice</Button>
-              <Button variant="outline" onClick={() => { versionsQuery.refetch(); configQuery.refetch(); }}>Refrescar</Button>
+        <div className="space-y-4">
+            <div className="rounded-xl border border-violet-300/20 bg-gradient-to-br from-violet-500/10 via-slate-950/60 to-slate-950/80 p-4">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <p className="text-sm font-semibold text-slate-100">Índice y configuración Shelf</p>
+                  <p className="text-xs text-slate-300">Gestiona índice vectorial DINO/SigLIP, mantenimiento del catálogo y parámetros de reconocimiento.</p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Badge variant="outline">dinov2: {vectorIndexHealth.dinov2.status}</Badge>
+                  <Badge variant="outline">siglip: {vectorIndexHealth.siglip.status}</Badge>
+                  <Badge variant="outline">dim {vectorIndexHealth.dinov2.sampleDim ?? "—"} / {vectorIndexHealth.siglip.sampleDim ?? "—"}</Badge>
+                  <Button size="sm" onClick={() => rebuildIndexMutation.mutate()} disabled={rebuildIndexMutation.isPending}>Reconstruir índice</Button>
+                  <Button size="sm" variant="outline" onClick={() => { versionsQuery.refetch(); configQuery.refetch(); activeConfigQuery.refetch(); }}>Refrescar</Button>
+                </div>
+              </div>
             </div>
-            <div className="rounded-lg border border-amber-300/20 bg-amber-500/5 p-4">
+
+            <div className="flex flex-wrap gap-2">
+              <Button size="sm" variant={indexWorkspaceSection === "indices" ? "default" : "outline"} onClick={() => setIndexWorkspaceSection("indices")}>Índices y operaciones</Button>
+              <Button size="sm" variant={indexWorkspaceSection === "config" ? "default" : "outline"} onClick={() => setIndexWorkspaceSection("config")}>Configuración</Button>
+              <Button size="sm" variant={indexWorkspaceSection === "tecnico" ? "default" : "outline"} onClick={() => setIndexWorkspaceSection("tecnico")}>Vista técnica</Button>
+            </div>
+
+            {indexWorkspaceSection === "indices" ? (
+            <div className="space-y-4">
+            <div className="rounded-xl border border-amber-300/20 bg-amber-500/5 p-4">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div>
                   <p className="text-sm font-semibold">Normalizar SKUs duplicados por mayúsculas/minúsculas</p>
@@ -6795,12 +8083,17 @@ export function AccountShelfPage({ account }: Props) {
                   <pre className="mt-2 max-h-64 overflow-auto text-xs">{JSON.stringify(reliabilityCompareQuery.data, null, 2)}</pre>
                 </div>
               ) : null}
-              <div className="mt-3 rounded-lg border border-white/10 bg-black/20 p-3">
-                <p className="text-xs text-slate-400">Resumen confiabilidad</p>
+              <details className="mt-3 rounded-lg border border-white/10 bg-black/20 p-3">
+                <summary className="cursor-pointer text-xs font-medium text-slate-300">JSON resumen confiabilidad</summary>
                 <pre className="mt-2 max-h-64 overflow-auto text-xs">{JSON.stringify(reliabilitySummaryQuery.data ?? {}, null, 2)}</pre>
-              </div>
+              </details>
             </div>
-            <div className="rounded-lg border border-cyan-300/20 bg-cyan-500/5 p-4">
+            </div>
+            ) : null}
+
+            {indexWorkspaceSection === "config" ? (
+            <div className="space-y-4">
+            <div className="rounded-xl border border-cyan-300/20 bg-cyan-500/5 p-4">
               <div className="mb-4 rounded-lg border border-sky-300/20 bg-sky-500/5 p-4">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div>
@@ -7062,15 +8355,15 @@ export function AccountShelfPage({ account }: Props) {
               <div className="mt-3 grid gap-3 md:grid-cols-3">
                 <div className="rounded-lg border border-white/10 bg-black/20 p-3">
                   <p className="text-xs text-slate-400">Imágenes</p>
-                  <p className="mt-1 text-lg font-semibold text-slate-100">{String(datasetSummaryQuery.data?.totals?.images ?? "-")}</p>
+                  <p className="mt-1 text-lg font-semibold text-slate-100">{String(datasetSummaryTotalsFromResponse(datasetSummaryQuery.data).total_images || "-")}</p>
                 </div>
                 <div className="rounded-lg border border-white/10 bg-black/20 p-3">
                   <p className="text-xs text-slate-400">Indexables</p>
-                  <p className="mt-1 text-lg font-semibold text-slate-100">{String(datasetSummaryQuery.data?.totals?.indexable_images ?? "-")}</p>
+                  <p className="mt-1 text-lg font-semibold text-slate-100">{String(datasetSummaryTotalsFromResponse(datasetSummaryQuery.data).indexable_images || "-")}</p>
                 </div>
                 <div className="rounded-lg border border-white/10 bg-black/20 p-3">
                   <p className="text-xs text-slate-400">SKUs</p>
-                  <p className="mt-1 text-lg font-semibold text-slate-100">{String(datasetSummaryQuery.data?.totals?.skus ?? "-")}</p>
+                  <p className="mt-1 text-lg font-semibold text-slate-100">{String(datasetSummaryBySkuRows(datasetSummaryQuery.data).length || datasetSummaryQuery.data?.summary?.skus || datasetSummaryQuery.data?.totals?.skus || "-")}</p>
                 </div>
               </div>
               <div className="mt-3 grid gap-4 xl:grid-cols-2">
@@ -7157,120 +8450,323 @@ export function AccountShelfPage({ account }: Props) {
                 )}
               </div>
             </div>
+            <div className="rounded-lg border border-cyan-300/20 bg-cyan-500/5 p-4">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <p className="text-sm font-semibold text-slate-100">OCR SKU Assist</p>
+                  <p className="text-xs text-slate-300">Asistencia con GLM-OCR para reforzar el matching visual. Corre solo en recognition, no afecta promociones.</p>
+                </div>
+                <div className="flex items-center gap-3">
+                  <Badge variant={ocrAssistDraft.enabled ? "default" : "secondary"}>{ocrAssistDraft.enabled ? "Activo" : "Desactivado"}</Badge>
+                  {ocrAssistDirty ? <Badge variant="destructive">Sin guardar</Badge> : null}
+                </div>
+              </div>
+
+              <div className="mt-3 flex items-center justify-between rounded border border-white/10 bg-white/5 p-3">
+                <div className="space-y-1 pr-4">
+                  <Label htmlFor="ocr-assist-enabled" className="cursor-pointer text-sm font-medium">Habilitar OCR Assist</Label>
+                  <p className="text-[11px] text-slate-400">Maestro. Apagado = no se llama a GLM-OCR en ningún crop.</p>
+                </div>
+                <Switch id="ocr-assist-enabled" checked={ocrAssistDraft.enabled} onCheckedChange={(v) => { setOcrAssistDraft((d) => ({ ...d, enabled: v })); setOcrAssistDirty(true); }} />
+              </div>
+
+              {ocrAssistDraft.enabled ? (
+                <div className="mt-3 space-y-3">
+                  <div className="grid gap-3 md:grid-cols-2">
+                    <div className="flex items-center justify-between rounded border border-white/10 bg-white/5 p-3">
+                      <div className="space-y-1 pr-4">
+                        <Label htmlFor="ocr-assist-ambiguous" className="cursor-pointer text-sm">Solo cuando ambiguo</Label>
+                        <p className="text-[11px] text-slate-400">ON = salta OCR si top1 ya tiene high_confidence. Recomendado para producción.</p>
+                      </div>
+                      <Switch id="ocr-assist-ambiguous" checked={ocrAssistDraft.only_when_ambiguous} onCheckedChange={(v) => { setOcrAssistDraft((d) => ({ ...d, only_when_ambiguous: v })); setOcrAssistDirty(true); }} />
+                    </div>
+                    <div className="flex items-center justify-between rounded border border-white/10 bg-white/5 p-3">
+                      <div className="space-y-1 pr-4">
+                        <Label htmlFor="ocr-assist-reorder" className="cursor-pointer text-sm">Reordenar top candidates</Label>
+                        <p className="text-[11px] text-slate-400">Si tras el boost cambia el orden, reordena. OFF = solo audita sin afectar el resultado.</p>
+                      </div>
+                      <Switch id="ocr-assist-reorder" checked={ocrAssistDraft.reorder_top_candidates} onCheckedChange={(v) => { setOcrAssistDraft((d) => ({ ...d, reorder_top_candidates: v })); setOcrAssistDirty(true); }} />
+                    </div>
+                  </div>
+
+                  <div className="grid gap-3 md:grid-cols-2">
+                    <div className="flex items-center justify-between rounded border border-white/10 bg-white/5 p-3">
+                      <div className="space-y-1 pr-4">
+                        <Label htmlFor="ocr-assist-prefetch" className="cursor-pointer text-sm">Prefetch catalogo por categoria</Label>
+                        <p className="text-[11px] text-slate-400">Precarga shelf_skus filtrado por categoría fuzzy (exact/substring/tokens).</p>
+                      </div>
+                      <Switch id="ocr-assist-prefetch" checked={ocrAssistDraft.prefetch_catalog_by_category} onCheckedChange={(v) => { setOcrAssistDraft((d) => ({ ...d, prefetch_catalog_by_category: v })); setOcrAssistDirty(true); }} />
+                    </div>
+                    <div className="space-y-1 rounded border border-white/10 bg-white/5 p-3">
+                      <Label htmlFor="ocr-assist-topk">Top-K candidatos</Label>
+                      <Input id="ocr-assist-topk" type="number" min={1} max={10} value={ocrAssistDraft.apply_to_top_k} onChange={(e) => { setOcrAssistDraft((d) => ({ ...d, apply_to_top_k: Number(e.target.value) || 3 })); setOcrAssistDirty(true); }} className="bg-white/5 border-white/10" />
+                    </div>
+                  </div>
+
+                  <div className="rounded-lg border border-amber-300/20 bg-amber-500/5 p-3">
+                    <p className="mb-2 text-xs font-semibold text-slate-200">Score boost por señal OCR</p>
+                    <div className="grid gap-3 md:grid-cols-5">
+                      <div className="space-y-1">
+                        <Label className="text-[11px]">barcode_exact</Label>
+                        <Input type="number" step="0.01" min={0} max={1} value={ocrAssistDraft.score_boost_barcode_exact} onChange={(e) => { setOcrAssistDraft((d) => ({ ...d, score_boost_barcode_exact: Number(e.target.value) })); setOcrAssistDirty(true); }} className="bg-white/5 border-white/10" />
+                      </div>
+                      <div className="space-y-1">
+                        <Label className="text-[11px]">marca</Label>
+                        <Input type="number" step="0.01" min={0} max={1} value={ocrAssistDraft.score_boost_marca} onChange={(e) => { setOcrAssistDraft((d) => ({ ...d, score_boost_marca: Number(e.target.value) })); setOcrAssistDirty(true); }} className="bg-white/5 border-white/10" />
+                      </div>
+                      <div className="space-y-1">
+                        <Label className="text-[11px]">tamano</Label>
+                        <Input type="number" step="0.01" min={0} max={1} value={ocrAssistDraft.score_boost_tamano} onChange={(e) => { setOcrAssistDraft((d) => ({ ...d, score_boost_tamano: Number(e.target.value) })); setOcrAssistDirty(true); }} className="bg-white/5 border-white/10" />
+                      </div>
+                      <div className="space-y-1">
+                        <Label className="text-[11px]">variante</Label>
+                        <Input type="number" step="0.01" min={0} max={1} value={ocrAssistDraft.score_boost_variante} onChange={(e) => { setOcrAssistDraft((d) => ({ ...d, score_boost_variante: Number(e.target.value) })); setOcrAssistDirty(true); }} className="bg-white/5 border-white/10" />
+                      </div>
+                      <div className="space-y-1">
+                        <Label className="text-[11px]">penalty conflicto</Label>
+                        <Input type="number" step="0.01" min={0} max={1} value={ocrAssistDraft.score_penalty_on_conflict} onChange={(e) => { setOcrAssistDraft((d) => ({ ...d, score_penalty_on_conflict: Number(e.target.value) })); setOcrAssistDirty(true); }} className="bg-white/5 border-white/10" />
+                      </div>
+                    </div>
+                    <p className="mt-2 text-[11px] text-slate-400">Poner 0 en cualquier campo desactiva esa señal. Penalty aplica cuando OCR detecta tamaño distinto al del SKU candidato.</p>
+                  </div>
+
+                  <details className="rounded-lg border border-white/10 bg-black/20 p-3">
+                    <summary className="cursor-pointer text-sm font-medium text-slate-200">Parametros de velocidad</summary>
+                    <div className="mt-3 grid gap-3 md:grid-cols-4">
+                      <div className="space-y-1">
+                        <Label className="text-[11px]">num_predict</Label>
+                        <Input type="number" min={32} max={512} value={ocrAssistDraft.num_predict} onChange={(e) => { setOcrAssistDraft((d) => ({ ...d, num_predict: Number(e.target.value) || 128 })); setOcrAssistDirty(true); }} className="bg-white/5 border-white/10" />
+                      </div>
+                      <div className="space-y-1">
+                        <Label className="text-[11px]">num_ctx</Label>
+                        <Input type="number" min={256} max={4096} value={ocrAssistDraft.num_ctx} onChange={(e) => { setOcrAssistDraft((d) => ({ ...d, num_ctx: Number(e.target.value) || 1024 })); setOcrAssistDirty(true); }} className="bg-white/5 border-white/10" />
+                      </div>
+                      <div className="space-y-1">
+                        <Label className="text-[11px]">timeout_sec</Label>
+                        <Input type="number" min={3} max={60} value={ocrAssistDraft.timeout_sec} onChange={(e) => { setOcrAssistDraft((d) => ({ ...d, timeout_sec: Number(e.target.value) || 12 })); setOcrAssistDirty(true); }} className="bg-white/5 border-white/10" />
+                      </div>
+                      <div className="space-y-1">
+                        <Label className="text-[11px]">min_text_chars</Label>
+                        <Input type="number" min={1} max={20} value={ocrAssistDraft.min_text_chars} onChange={(e) => { setOcrAssistDraft((d) => ({ ...d, min_text_chars: Number(e.target.value) || 4 })); setOcrAssistDirty(true); }} className="bg-white/5 border-white/10" />
+                      </div>
+                    </div>
+                    <div className="mt-2 space-y-1">
+                      <Label className="text-[11px]">prefetch_max_rows</Label>
+                      <Input type="number" min={50} max={20000} value={ocrAssistDraft.prefetch_max_rows} onChange={(e) => { setOcrAssistDraft((d) => ({ ...d, prefetch_max_rows: Number(e.target.value) || 2000 })); setOcrAssistDirty(true); }} className="bg-white/5 border-white/10 max-w-xs" />
+                    </div>
+                  </details>
+
+                  <div className="flex justify-end">
+                    <Button onClick={() => saveOcrAssistMutation.mutate()} disabled={!ocrAssistDirty || saveOcrAssistMutation.isPending}>
+                      {saveOcrAssistMutation.isPending ? "Guardando..." : "Guardar OCR Assist"}
+                    </Button>
+                  </div>
+                </div>
+              ) : null}
+            </div>
+            </div>
+            ) : null}
+
+            {indexWorkspaceSection === "tecnico" ? (
+            <div className="space-y-4">
+            <div className="rounded-xl border border-white/10 bg-black/20 p-4">
+              <p className="text-sm font-semibold text-slate-100">Payloads crudos de backend</p>
+              <p className="mt-1 text-xs text-slate-400">Fuente de verdad para depuración: shelf/config y vector-index/versions.</p>
+            </div>
             <div className="rounded-lg border border-white/10 bg-black/20 p-3">
               <p className="mb-1 text-xs text-slate-400">shelf/config (fuente de verdad para dino/siglip)</p>
-              <pre className="max-h-56 overflow-auto text-xs">{JSON.stringify(configQuery.data ?? {}, null, 2)}</pre>
+              <pre className="max-h-96 overflow-auto text-xs">{JSON.stringify(configQuery.data ?? {}, null, 2)}</pre>
             </div>
             <div className="rounded-lg border border-white/10 bg-black/20 p-3">
               <p className="mb-1 text-xs text-slate-400">vector-index/versions</p>
-              <pre className="max-h-56 overflow-auto text-xs">{JSON.stringify(versionsQuery.data ?? [], null, 2)}</pre>
+              <pre className="max-h-96 overflow-auto text-xs">{JSON.stringify(versionsQuery.data ?? [], null, 2)}</pre>
             </div>
-          </CardContent>
-        </Card>
+            </div>
+            ) : null}
+        </div>
       ) : null}
 
       {tab === "review" ? (
-        <Card className="border-white/10 bg-white/5">
-          <CardHeader><CardTitle>Review Queue (low_confidence / unknown_sku)</CardTitle></CardHeader>
-          <CardContent className="space-y-3">
-            <div className="rounded-lg border border-white/10 bg-black/20 p-3">
-              <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="space-y-4">
+            <div className="rounded-xl border border-rose-300/20 bg-gradient-to-br from-rose-500/10 via-slate-950/60 to-slate-950/80 p-4">
+              <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
-                  <p className="text-sm font-semibold">Selector de SKU</p>
-                  <p className="text-xs text-slate-300">Busca el SKU correcto por código, nombre, marca o categoría y úsalo para `assign_sku`.</p>
+                  <p className="text-sm font-semibold text-slate-100">Review queue · crops pendientes de decisión</p>
+                  <p className="text-xs text-slate-300">Resuelve low_confidence y unknown_sku. Elige el SKU correcto en la barra lateral y, si aplica, marca candidatos como similar pero incorrecto.</p>
                 </div>
-                <Badge variant="outline">SKU seleccionado: {reviewDecisionSkuId || "ninguno"}</Badge>
-              </div>
-              <div className="mt-3 grid gap-3 md:grid-cols-[1fr_auto]">
-                <Input
-                  placeholder="Buscar SKU para asignar..."
-                  value={reviewSkuSearch}
-                  onChange={(e) => setReviewSkuSearch(e.target.value)}
-                />
-                <Button variant="outline" onClick={() => skusQuery.refetch()}>Actualizar catálogo</Button>
-              </div>
-              <div className="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                {filteredReviewSkus.map((sku) => {
-                  const code = getSkuCodeValue(sku);
-                  const selected = code === reviewDecisionSkuId;
-                  return (
-                    <button
-                      key={`review-sku-${code}`}
-                      type="button"
-                      onClick={() => setReviewDecisionSkuId(code)}
-                      className={`rounded-lg border p-3 text-left transition ${selected ? "border-cyan-300/40 bg-cyan-500/10" : "border-white/10 bg-slate-950/40 hover:bg-slate-900/50"}`}
-                    >
-                      <div className="flex items-center justify-between gap-2">
-                        <p className="font-mono text-sm text-slate-100">{code || "-"}</p>
-                        <Badge variant={selected ? "default" : "outline"}>{selected ? "Seleccionado" : "Usar"}</Badge>
-                      </div>
-                      <p className="mt-2 text-sm text-slate-100">{getSkuNameValue(sku) || "Sin nombre"}</p>
-                      <div className="mt-2 flex flex-wrap gap-2 text-xs text-slate-300">
-                        {getSkuBrandValue(sku) ? <span>{getSkuBrandValue(sku)}</span> : null}
-                        {getSkuFamilyValue(sku) ? <span>{getSkuFamilyValue(sku)}</span> : null}
-                      </div>
-                    </button>
-                  );
-                })}
+                <div className="flex flex-wrap gap-2">
+                  <Badge variant="outline">{reviewQueueSummary.total} en cola</Badge>
+                  <Badge variant="secondary">{reviewQueueSummary.low} low</Badge>
+                  <Badge variant="outline">{reviewQueueSummary.unknown} unknown</Badge>
+                  <Badge variant="outline">{reviewQueueSummary.medium} medium</Badge>
+                  <Badge variant="outline">SKU: {reviewDecisionSkuId || "—"}</Badge>
+                  <Button size="sm" variant="outline" onClick={() => reviewQueueQuery.refetch()} disabled={reviewQueueQuery.isFetching}>Refrescar</Button>
+                </div>
               </div>
             </div>
 
-            <div className="flex flex-wrap items-center gap-2">
-              <Input placeholder="Buscar por job, predicted SKU o motivo..." value={reviewSearch} onChange={(e) => setReviewSearch(e.target.value)} className="max-w-md" />
-              <select
-                value={reviewStateFilter}
-                onChange={(e) => setReviewStateFilter(e.target.value)}
-                className="h-10 rounded-md border border-white/10 bg-slate-900 px-3 text-sm"
-              >
-                <option value="all">Todos los estados</option>
-                <option value="low_confidence">low_confidence</option>
-                <option value="medium_confidence">medium_confidence</option>
-                <option value="unknown_sku">unknown_sku</option>
-                <option value="high_confidence">high_confidence</option>
-              </select>
-              <Button variant="outline" onClick={() => reviewQueueQuery.refetch()}>Refrescar</Button>
-            </div>
-            <div className="overflow-x-auto rounded-lg border border-white/10">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>item_id</TableHead>
-                    <TableHead>job_id</TableHead>
-                    <TableHead>confidence_state</TableHead>
-                    <TableHead>predicted_sku</TableHead>
-                    <TableHead>accion</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {filteredReviewItems.map((item: ShelfReviewQueueItem) => {
-                    const id = item.item_id ?? item.id ?? 0;
-                    return (
-                      <TableRow key={`rq-${id}`}>
-                        <TableCell>{String(id)}</TableCell>
-                        <TableCell>{String(item.job_id ?? "-")}</TableCell>
-                        <TableCell>{confidenceBadge(String(item.confidence_state ?? ""))}</TableCell>
-                        <TableCell>{String(item.predicted_sku_name ?? item.predicted_sku_id ?? "-")}</TableCell>
-                        <TableCell>
-                          <div className="flex flex-wrap gap-1">
-                            <Button size="sm" variant="outline" onClick={() => resolveReviewMutation.mutate({ itemId: id, decision: "accept_top1" })}>accept_top1</Button>
-                            <Button size="sm" variant="outline" onClick={() => resolveReviewMutation.mutate({ itemId: id, decision: "assign_sku" })}>assign_sku</Button>
-                            <Button size="sm" variant="outline" onClick={() => resolveReviewMutation.mutate({ itemId: id, decision: "mark_unknown" })}>mark_unknown</Button>
-                            <Button size="sm" variant="outline" onClick={() => resolveReviewMutation.mutate({ itemId: id, decision: "discard_crop" })}>discard_crop</Button>
+            <div className="grid gap-4 xl:grid-cols-[minmax(280px,320px)_minmax(0,1fr)]">
+              <div className="max-h-[72vh] overflow-y-auto rounded-xl border border-white/10 bg-slate-950/50 p-2">
+                <p className="sticky top-0 z-10 border-b border-white/10 bg-slate-950/95 px-2 py-2 text-xs font-semibold uppercase tracking-wide text-slate-400">SKU correcto (ancla)</p>
+                <p className="px-2 pt-2 text-[11px] text-slate-500">Usado para assign_sku y para registrar confusiones. No mueve imágenes al SKU confundido.</p>
+                <div className="space-y-2 p-2">
+                  <Input
+                    placeholder="Buscar SKU..."
+                    value={reviewSkuSearch}
+                    onChange={(e) => setReviewSkuSearch(e.target.value)}
+                    className="h-9 text-xs"
+                  />
+                  <Button variant="outline" size="sm" className="w-full" onClick={() => skusQuery.refetch()} disabled={skusQuery.isFetching}>Actualizar catálogo</Button>
+                  <div className="space-y-2">
+                    {filteredReviewSkus.map((sku) => {
+                      const code = getSkuCodeValue(sku);
+                      const selected = code === reviewDecisionSkuId;
+                      return (
+                        <button
+                          key={`review-sku-${code}`}
+                          type="button"
+                          onClick={() => setReviewDecisionSkuId(code)}
+                          className={`w-full rounded-lg border p-2 text-left transition ${selected ? "border-rose-300/40 bg-rose-500/10 ring-1 ring-rose-400/20" : "border-white/10 bg-black/20 hover:bg-black/30"}`}
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <p className="font-mono text-xs text-slate-100">{code || "—"}</p>
+                            <Badge variant={selected ? "default" : "outline"} className="text-[10px]">{selected ? "asignar" : "elegir"}</Badge>
                           </div>
-                        </TableCell>
+                          <p className="mt-1 line-clamp-1 text-[11px] text-slate-400">{getSkuNameValue(sku) || "Sin nombre"}</p>
+                        </button>
+                      );
+                    })}
+                    {!filteredReviewSkus.length ? <p className="py-4 text-center text-xs text-slate-400">Sin coincidencias.</p> : null}
+                  </div>
+                </div>
+              </div>
+
+              <div className="space-y-4">
+                <div className="rounded-xl border border-white/10 bg-black/20 p-4">
+                  <p className="text-sm font-semibold text-slate-100">Filtrar cola</p>
+                  <div className="mt-3 flex flex-wrap items-center gap-2">
+                    <Input placeholder="Buscar job, SKU predicho o motivo..." value={reviewSearch} onChange={(e) => setReviewSearch(e.target.value)} className="max-w-md" />
+                    {([
+                      ["all", "Todos"],
+                      ["low_confidence", "low_confidence"],
+                      ["medium_confidence", "medium"],
+                      ["unknown_sku", "unknown"],
+                      ["high_confidence", "high"],
+                    ] as const).map(([key, label]) => (
+                      <Button key={`rq-filter-${key}`} size="sm" variant={reviewStateFilter === key ? "default" : "outline"} onClick={() => setReviewStateFilter(key)}>{label}</Button>
+                    ))}
+                  </div>
+                  <p className="mt-2 text-xs text-slate-400">{filteredReviewItems.length} de {reviewQueueSummary.total} visibles · auto-refresh 4s</p>
+                </div>
+
+                <div className="overflow-x-auto rounded-xl border border-white/10 bg-slate-950/40">
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>item_id</TableHead>
+                        <TableHead>job_id</TableHead>
+                        <TableHead>confidence_state</TableHead>
+                        <TableHead>predicted_sku</TableHead>
+                        <TableHead>accion</TableHead>
                       </TableRow>
-                    );
-                  })}
-                  {!filteredReviewItems.length ? (
-                    <TableRow>
-                      <TableCell colSpan={5}>No hay items para los filtros actuales.</TableCell>
-                    </TableRow>
-                  ) : null}
-                </TableBody>
-              </Table>
+                    </TableHeader>
+                    <TableBody>
+                      {filteredReviewItems.map((item: ShelfReviewQueueItem) => {
+                        const id = item.item_id ?? item.id ?? 0;
+                        const idKey = String(id);
+                        const predictedCode = reviewItemPredictedSkuCode(item);
+                        const anchorSku = reviewDecisionSkuId.trim();
+                        const canMarkPredictedConfusion = Boolean(anchorSku) && Boolean(predictedCode) && !skuCodesEqual(anchorSku, predictedCode);
+                        const predictedConfusionKey = canMarkPredictedConfusion ? skuConfusionKey(anchorSku, predictedCode) : "";
+                        const predictedConfusionSaved = predictedConfusionKey ? savedSkuConfusionKeys.has(predictedConfusionKey) : false;
+                        return (
+                          <TableRow
+                            key={`rq-${id}`}
+                            className={selectedReviewItemId === idKey ? "bg-rose-500/10" : "cursor-pointer hover:bg-white/5"}
+                            onClick={() => setSelectedReviewItemId(idKey)}
+                          >
+                            <TableCell className="font-mono text-xs">{idKey}</TableCell>
+                            <TableCell className="font-mono text-xs">{String(item.job_id ?? "-")}</TableCell>
+                            <TableCell>{confidenceBadge(String(item.confidence_state ?? ""))}</TableCell>
+                            <TableCell>
+                              <p className="font-mono text-xs">{predictedCode || "-"}</p>
+                              {item.predicted_sku_name && !skuCodesEqual(predictedCode, item.predicted_sku_name) ? (
+                                <p className="text-[11px] text-slate-400">{item.predicted_sku_name}</p>
+                              ) : null}
+                            </TableCell>
+                            <TableCell>
+                              <div className="flex flex-wrap gap-1" onClick={(e) => e.stopPropagation()}>
+                                <Button size="sm" variant="outline" onClick={() => resolveReviewMutation.mutate({ itemId: id, decision: "accept_top1" })}>accept_top1</Button>
+                                <Button size="sm" variant="outline" onClick={() => resolveReviewMutation.mutate({ itemId: id, decision: "assign_sku" })} disabled={!reviewDecisionSkuId.trim()}>assign_sku</Button>
+                                <Button size="sm" variant="outline" onClick={() => resolveReviewMutation.mutate({ itemId: id, decision: "mark_unknown" })}>mark_unknown</Button>
+                                <Button size="sm" variant="ghost" onClick={() => resolveReviewMutation.mutate({ itemId: id, decision: "discard_crop" })}>discard</Button>
+                                {canMarkPredictedConfusion ? (
+                                  <Button
+                                    size="sm"
+                                    variant="ghost"
+                                    className="text-amber-100 hover:text-amber-50"
+                                    disabled={markSkuConfusionMutation.isPending || predictedConfusionSaved}
+                                    title="No reasigna la imagen. Solo guarda que este SKU suele confundirse con el correcto."
+                                    onClick={() => markSkuConfusionMutation.mutate({ anchorSku, negativeSku: predictedCode })}
+                                  >
+                                    {predictedConfusionSaved ? "Confusión guardada" : "Similar pero incorrecto"}
+                                  </Button>
+                                ) : null}
+                              </div>
+                            </TableCell>
+                          </TableRow>
+                        );
+                      })}
+                      {!filteredReviewItems.length ? (
+                        <TableRow>
+                          <TableCell colSpan={5} className="py-8 text-center text-slate-400">No hay items para los filtros actuales.</TableCell>
+                        </TableRow>
+                      ) : null}
+                    </TableBody>
+                  </Table>
+                </div>
+
+                {selectedReviewItem ? (
+                  <div className="rounded-xl border border-rose-300/20 bg-rose-500/5 p-4">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div>
+                        <p className="text-sm font-semibold text-slate-100">Item {selectedReviewItemId} · candidatos similares</p>
+                        <p className="mt-1 text-xs text-slate-400">
+                          {reviewDecisionSkuId.trim()
+                            ? `SKU correcto (ancla): ${reviewDecisionSkuId.trim()}`
+                            : "Elige el SKU correcto en la barra lateral para registrar confusiones."}
+                        </p>
+                      </div>
+                      {selectedReviewItem.crop_url ? (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img
+                          src={selectedReviewItem.crop_url}
+                          alt={`crop-${selectedReviewItemId}`}
+                          className="h-28 w-28 rounded-md border border-white/10 bg-black/30 object-contain"
+                        />
+                      ) : null}
+                    </div>
+                    <div className="mt-3">
+                      <SimilarCandidatesPanel
+                        candidates={reviewItemTopCandidates(selectedReviewItem)}
+                        anchorSku={reviewDecisionSkuId.trim()}
+                        selectedSku={reviewDecisionSkuId.trim()}
+                        onSelectCandidate={(code) => setReviewDecisionSkuId(code)}
+                        onMarkConfusion={(anchor, negative) => markSkuConfusionMutation.mutate({ anchorSku: anchor, negativeSku: negative })}
+                        onMarkAllRemainingConfusions={(anchor, negatives) => markAllSkuConfusionsMutation.mutate({ anchorSku: anchor, negativeSkus: negatives })}
+                        isMarking={markSkuConfusionMutation.isPending || markAllSkuConfusionsMutation.isPending}
+                        isMarkingAll={markAllSkuConfusionsMutation.isPending}
+                        savedConfusionKeys={savedSkuConfusionKeys}
+                        maxItems={5}
+                      />
+                    </div>
+                  </div>
+                ) : (
+                  <p className="text-xs text-slate-500">Selecciona un item de la tabla para ver candidatos y registrar confusiones.</p>
+                )}
+              </div>
             </div>
-          </CardContent>
-        </Card>
+        </div>
       ) : null}
 
       {tab === "results" && selectedResultTrainingItems.length ? (
@@ -7335,6 +8831,17 @@ export function AccountShelfPage({ account }: Props) {
           /results aun no disponible para este job (procesando o backend sin modulo shelf en este ambiente).
         </div>
       ) : null}
+
+      <MdReportDialog
+        open={Boolean(mdDialogRequest)}
+        onClose={() => setMdDialogRequest(null)}
+        title={mdDialogRequest?.title ?? "Reporte Shelf"}
+        markdown={mdDialogQuery.data ?? null}
+        isLoading={mdDialogQuery.isLoading}
+        error={mdDialogQuery.error instanceof Error ? mdDialogQuery.error.message : mdDialogQuery.error ? "Error al cargar markdown" : null}
+        sourceUrl={mdDialogRequest?.sourceUrl ?? null}
+        downloadFilename={mdDialogRequest?.downloadFilename}
+      />
     </div>
   );
 }

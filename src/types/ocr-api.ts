@@ -342,6 +342,7 @@ export type JobsMaintenanceCleanupRequest = JobsMaintenanceAuditRequest & {
   delete_local_files?: boolean;
   delete_azure_originals?: boolean;
   include_running_jobs?: boolean;
+  force_delete_recoverable?: boolean;
   confirm?: string;
 };
 
@@ -351,7 +352,18 @@ export type JobsMaintenanceDeleteRequest = {
   delete_local_files?: boolean;
   delete_azure_originals?: boolean;
   include_running_jobs?: boolean;
+  force_delete_recoverable?: boolean;
   confirm?: string;
+};
+
+export type JobsMaintenanceInferredOutputSignature = {
+  master_json?: string | null;
+  master_html?: string | null;
+  master_md?: string | null;
+  excel?: string | null;
+  image_json_paths?: string[];
+  annotated_paths?: string[];
+  [key: string]: unknown;
 };
 
 export type JobsMaintenanceAuditItem = {
@@ -359,10 +371,20 @@ export type JobsMaintenanceAuditItem = {
   account_name?: string | null;
   job_module?: string | null;
   status?: string | null;
-  health?: "ok" | "broken" | string;
+  health?: "ok" | "broken" | "recoverable" | string;
   issues?: string[];
+  recoverable_reasons?: string[];
   counts?: Record<string, unknown> | null;
-  result?: Record<string, unknown> | null;
+  result?: {
+    output_dir?: string | null;
+    master_json_path?: string | null;
+    master_html_path?: string | null;
+    master_md_path?: string | null;
+    excel_path?: string | null;
+    inferred_from_output_dir?: boolean;
+    [key: string]: unknown;
+  } | null;
+  inferred_output_signature?: JobsMaintenanceInferredOutputSignature | null;
   files?: {
     missing?: string[];
     existing_generated?: string[];
@@ -389,11 +411,14 @@ export type JobsMaintenanceAuditResponse = {
     jobs_scanned?: number;
     jobs_returned?: number;
     broken_jobs?: number;
+    recoverable_jobs?: number;
     orphan_output_dirs?: number;
+    jobs_skipped_recoverable?: number;
     [key: string]: unknown;
   };
   items?: JobsMaintenanceAuditItem[];
   orphan_output_dirs?: JobsMaintenanceOrphanDir[];
+  skipped_recoverable_jobs?: JobsMaintenanceAuditItem[];
   [key: string]: unknown;
 };
 
@@ -424,6 +449,10 @@ export type JobResponse = {
   rerun_of_job_id?: string | null;
   retry_count?: number;
   reused_inputs?: boolean;
+  ignored_phrase_review?: {
+    suggestions_endpoint?: string;
+    [key: string]: unknown;
+  } | null;
   images: JobImage[];
 };
 
@@ -1740,6 +1769,88 @@ export type ChainIgnoredPhraseUpsertRequest = {
   is_active?: boolean;
 };
 
+export type AccountIgnoredPhraseCreateRequest = {
+  phrase: string;
+  scope: string;
+  is_active?: boolean;
+  chain_whitelist?: string[];
+};
+
+export type AccountIgnoredPhrasePatchRequest = {
+  phrase?: string;
+  scope?: string;
+  is_active?: boolean;
+  chain_whitelist?: string[];
+};
+
+export type AccountIgnoredPhrase = {
+  id: number;
+  phrase: string;
+  scope: string;
+  chain_whitelist: string[];
+  is_active: number | boolean;
+  created_at?: string;
+  updated_at?: string;
+};
+
+export type NameNoiseSeedInfo = {
+  bootstrapped?: boolean;
+  already_seeded?: boolean;
+  scope?: string;
+  seeded_count?: number;
+  version?: string;
+};
+
+export type AccountIgnoredPhrasesResponse = {
+  account_name: string;
+  ignored_phrases: AccountIgnoredPhrase[];
+  name_noise_seed_info?: NameNoiseSeedInfo | null;
+};
+
+// ── Job ignored-phrase suggestions (noise review) ──────────────
+
+export type IgnoredPhraseSuggestionExample = {
+  snippet: string;
+  image_process_code?: string | null;
+  source_kind?: string | null;
+  [key: string]: unknown;
+};
+
+export type IgnoredPhraseSuggestion = {
+  phrase: string;
+  confidence: number;
+  occurrences: number;
+  image_process_codes: string[];
+  source_kinds: string[];
+  snippet?: string | null;
+  examples?: IgnoredPhraseSuggestionExample[];
+  already_exists: boolean;
+  [key: string]: unknown;
+};
+
+export type IgnoredPhraseSuggestionsResponse = {
+  phrase_suggestions: IgnoredPhraseSuggestion[];
+  support_noise_candidates: IgnoredPhraseSuggestion[];
+  summary?: {
+    total_phrases_scanned?: number;
+    total_suggestions?: number;
+    total_already_saved?: number;
+    [key: string]: unknown;
+  };
+  job_context?: {
+    job_id?: string;
+    account_name?: string;
+    cadena_resuelta?: string | null;
+    [key: string]: unknown;
+  };
+  apply_hint?: {
+    scope?: string;
+    endpoint?: string;
+    [key: string]: unknown;
+  };
+  [key: string]: unknown;
+};
+
 export type AccountPromptSlot = "ocr" | "vision" | string;
 
 export type AccountPromptFileItem = {
@@ -2015,11 +2126,25 @@ export type BulkJobDeleteResponse = {
   results: Array<Record<string, unknown>>;
 };
 
+export type ShelfCandidateScoreBreakdown = {
+  visual?: number | null;
+  hard_negative_penalty_applied?: number | null;
+  hard_negative_triggered_by?: string[];
+  [key: string]: unknown;
+};
+
 export type ShelfCandidate = {
   sku_id?: number | string | null;
   sku_code?: string | null;
   sku_name?: string | null;
   score?: number | null;
+  score_breakdown?: ShelfCandidateScoreBreakdown | Record<string, unknown> | null;
+  [key: string]: unknown;
+};
+
+export type ShelfRecognitionHardNegativeSummary = {
+  total_hard_negative_penalty_applied?: number;
+  hard_negative_pairs_triggered?: Record<string, number>;
   [key: string]: unknown;
 };
 
@@ -2182,12 +2307,33 @@ export type ShelfEmbeddingsRecomputeResponse = {
   [key: string]: unknown;
 };
 
+export type ShelfEmbeddingStatus =
+  | "complete"
+  | "partial"
+  | "fallback"
+  | "failed"
+  | "pending"
+  | "not_indexable"
+  | "unknown"
+  | string;
+
+export type ShelfEmbeddingDiagnosticsSummary = {
+  outcome_status?: string | null;
+  fallback_used?: boolean | null;
+  failed_models?: string[];
+  missing_models?: string[];
+  available_models?: string[];
+  expected_models?: string[];
+  [key: string]: unknown;
+};
+
 export type ShelfSkuImage = {
   id?: number;
   image_id?: number;
   sku_id?: string | number | null;
   dataset_role?: string | null;
   dataset_split?: string | null;
+  is_indexable?: boolean | number | null;
   preview_url?: string | null;
   download_url?: string | null;
   public_url?: string | null;
@@ -2202,6 +2348,12 @@ export type ShelfSkuImage = {
   image_path?: string | null;
   file_id?: string | null;
   created_at?: string;
+  embedding_status?: ShelfEmbeddingStatus | null;
+  embedding_state?: string | null;
+  embedding_ids?: string[];
+  embedding_models?: string[];
+  embedding_diagnostics?: ShelfDiagnostics | null;
+  embedding_diagnostics_summary?: ShelfEmbeddingDiagnosticsSummary | null;
   [key: string]: unknown;
 };
 
@@ -2280,14 +2432,31 @@ export type ShelfHardNegative = {
 };
 
 export type ShelfDatasetSummaryResponse = {
+  status?: string;
   account_name?: string;
   sku_id?: string | null;
+  summary?: {
+    total_images?: number;
+    indexable_images?: number;
+    non_indexable_images?: number;
+    skus?: number;
+    [key: string]: unknown;
+  } | null;
   totals?: {
     images?: number;
     indexable_images?: number;
     skus?: number;
     [key: string]: unknown;
   } | null;
+  skus?: Array<{
+    sku_id?: string | null;
+    sku_name?: string | null;
+    total_images?: number | null;
+    indexable_images?: number | null;
+    count?: number | null;
+    indexable_count?: number | null;
+    [key: string]: unknown;
+  }>;
   by_role?: Array<{
     dataset_role?: string | null;
     count?: number | null;
@@ -2299,6 +2468,7 @@ export type ShelfDatasetSummaryResponse = {
     count?: number | null;
     [key: string]: unknown;
   }>;
+  /** @deprecated backend expone `skus`, no `by_sku` */
   by_sku?: Array<{
     sku_id?: string | null;
     sku_name?: string | null;
@@ -2424,8 +2594,11 @@ export type ShelfReviewQueueItem = {
   status?: string;
   decision?: string | null;
   confidence_state?: ShelfConfidenceState;
-  predicted_sku_id?: number | null;
+  predicted_sku_id?: number | string | null;
   predicted_sku_name?: string | null;
+  predicted_sku_code?: string | null;
+  suggested_sku_id?: string | null;
+  top_candidates?: ShelfCandidate[];
   crop_url?: string | null;
   image_id?: number | null;
   job_id?: string | null;

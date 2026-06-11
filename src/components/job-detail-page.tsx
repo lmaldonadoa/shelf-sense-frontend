@@ -15,6 +15,7 @@ import { JobImagesTable } from "@/components/jobs/job-images-table";
 import { DetectionsTable } from "@/components/jobs/detections-table";
 import { JobLiveTimeline } from "@/components/jobs/job-live-timeline";
 import { JobMetricsPanel } from "@/components/jobs/job-metrics-panel";
+import { JobNoiseReviewPanel } from "@/components/jobs/job-noise-review-panel";
 
 type ArtifactLinkProps = {
   href?: string | null;
@@ -184,6 +185,10 @@ export default function JobDetailPage({ jobId }: { jobId: string }) {
       ) : null}
 
       <JobMetricsPanel jobId={jobId} isTerminal={isTerminal} />
+
+      {jobQuery.data?.account_name && (
+        <JobNoiseReviewPanel jobId={jobId} account={jobQuery.data.account_name} />
+      )}
 
       <Card className="border-white/10 bg-white/5 backdrop-blur">
         <CardHeader><CardTitle className="text-base">Contexto PDV / POS</CardTitle></CardHeader>

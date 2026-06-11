@@ -1,8 +1,24 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { AlertTriangle, Download, Loader2, RefreshCcw } from "lucide-react";
+import {
+  Activity,
+  AlertTriangle,
+  BarChart3,
+  Bot,
+  ChevronRight,
+  Download,
+  FlaskConical,
+  History,
+  Loader2,
+  Play,
+  RefreshCcw,
+  ShieldCheck,
+  Sparkles,
+  Target,
+  Upload,
+} from "lucide-react";
 import { toast } from "sonner";
 import { HttpError, ocrApi } from "@/lib/ocrApi";
 import type {
@@ -20,7 +36,7 @@ import { UploadPanel } from "@/components/jobs/upload-panel";
 import { UploadedFilesTable } from "@/components/jobs/uploaded-files-table";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -70,10 +86,151 @@ function extractMasterJsonCandidate(source: unknown): Record<string, unknown> | 
   return obj;
 }
 
-function scoreBadge(score: number): React.ReactNode {
-  if (score >= 0.8) return <Badge>Verde</Badge>;
-  if (score >= 0.5) return <Badge variant="secondary">Amarillo</Badge>;
-  return <Badge variant="destructive">Rojo</Badge>;
+function scoreBadge(score: number): ReactNode {
+  if (score >= 0.8) return <Badge className="border-emerald-400/40 bg-emerald-500/20 text-emerald-100">Alto</Badge>;
+  if (score >= 0.5) return <Badge className="border-amber-400/40 bg-amber-500/20 text-amber-100">Medio</Badge>;
+  return <Badge variant="destructive">Bajo</Badge>;
+}
+
+function benchmarkStatusBadge(status: string): ReactNode {
+  const normalized = status.toLowerCase();
+  if (["completed", "success", "partial_success", "done"].includes(normalized)) {
+    return <Badge className="border-emerald-400/40 bg-emerald-500/20 text-emerald-100">{status}</Badge>;
+  }
+  if (["failed", "error"].includes(normalized)) {
+    return <Badge variant="destructive">{status}</Badge>;
+  }
+  if (["running", "processing", "queued"].includes(normalized)) {
+    return <Badge className="border-amber-400/40 bg-amber-500/20 text-amber-100">{status}</Badge>;
+  }
+  return <Badge variant="outline">{status}</Badge>;
+}
+
+function toTitleCase(value: string): string {
+  return value.replace(/_/g, " ").trim().replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function MetricBarRow({ label, value, tone = "bg-cyan-400" }: { label: string; value: number; tone?: string }) {
+  return (
+    <div>
+      <div className="mb-1 flex items-center justify-between text-xs">
+        <span className="text-slate-400">{label}</span>
+        <span className="font-medium text-slate-200">{pct(value)}</span>
+      </div>
+      <div className="h-2 overflow-hidden rounded-full bg-slate-800">
+        <div className={`h-full rounded-full ${tone}`} style={{ width: `${Math.min(100, Math.max(0, value * 100))}%` }} />
+      </div>
+    </div>
+  );
+}
+
+function QualityKpiCard({
+  label,
+  value,
+  hint,
+  accent,
+  bar,
+  barClass = "bg-cyan-400",
+}: {
+  label: string;
+  value: string;
+  hint?: string;
+  accent: string;
+  bar?: number;
+  barClass?: string;
+}) {
+  return (
+    <Card className={`border-white/10 bg-gradient-to-br ${accent} to-black/20`}>
+      <CardContent className="pt-5">
+        <p className="text-[11px] font-medium uppercase tracking-wide text-slate-400">{label}</p>
+        <p className="mt-2 font-heading text-2xl font-semibold text-slate-50">{value}</p>
+        {hint ? <p className="mt-1 text-xs text-slate-400">{hint}</p> : null}
+        {typeof bar === "number" ? (
+          <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-slate-800">
+            <div className={`h-full rounded-full ${barClass}`} style={{ width: `${Math.min(100, Math.max(0, bar * 100))}%` }} />
+          </div>
+        ) : null}
+      </CardContent>
+    </Card>
+  );
+}
+
+function QualityTabButton({
+  active,
+  onClick,
+  icon,
+  label,
+  description,
+}: {
+  active: boolean;
+  onClick: () => void;
+  icon: ReactNode;
+  label: string;
+  description?: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`rounded-xl border px-4 py-3 text-left transition ${
+        active
+          ? "border-cyan-300/40 bg-cyan-500/15 shadow-lg shadow-cyan-950/20"
+          : "border-white/10 bg-black/20 hover:border-white/20 hover:bg-black/30"
+      }`}
+    >
+      <div className="flex items-center gap-2">
+        <span className={active ? "text-cyan-200" : "text-slate-400"}>{icon}</span>
+        <span className={`font-semibold ${active ? "text-cyan-50" : "text-slate-200"}`}>{label}</span>
+      </div>
+      {description ? <p className="mt-1 text-xs text-slate-400">{description}</p> : null}
+    </button>
+  );
+}
+
+function QualitySubTab({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`rounded-lg border px-3 py-1.5 text-sm transition ${
+        active
+          ? "border-lime-300/40 bg-lime-500/20 text-lime-100"
+          : "border-white/10 bg-black/20 text-slate-300 hover:bg-black/30"
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
+
+function EmptyState({ title, description }: { title: string; description: string }) {
+  return (
+    <Card className="border-dashed border-white/15 bg-black/15">
+      <CardContent className="py-8 text-center">
+        <p className="font-medium text-slate-200">{title}</p>
+        <p className="mt-1 text-sm text-slate-400">{description}</p>
+      </CardContent>
+    </Card>
+  );
+}
+
+function StepBadge({ step, label }: { step: number; label: string }) {
+  return (
+    <div className="flex items-center gap-2 text-xs text-slate-400">
+      <span className="flex h-6 w-6 items-center justify-center rounded-full border border-cyan-400/40 bg-cyan-500/15 font-semibold text-cyan-100">
+        {step}
+      </span>
+      <span>{label}</span>
+    </div>
+  );
 }
 
 function aiPhaseLabel(phase: string): string {
@@ -459,30 +616,79 @@ export function AccountQualityPage({ account }: Props) {
       .catch(() => undefined);
   }, [selectedBenchmarkId, useAsyncAi]);
 
+  const batchIsRunning = useMemo(() => {
+    const status = String(benchmarkDetailQuery.data?.status ?? benchmarkCreated?.status ?? "").toLowerCase();
+    return ["running", "queued", "processing"].includes(status);
+  }, [benchmarkDetailQuery.data?.status, benchmarkCreated?.status]);
+
   return (
-    <div className="space-y-6">
-      <Card className="border-white/10 bg-white/5 backdrop-blur">
-        <CardHeader><CardTitle>Calidad IA</CardTitle></CardHeader>
-        <CardContent className="flex flex-wrap gap-2">
-          <Button variant={tab === "observabilidad" ? "default" : "outline"} onClick={() => setTab("observabilidad")}>Observabilidad operativa</Button>
-          <Button variant={tab === "benchmark_offline" ? "default" : "outline"} onClick={() => setTab("benchmark_offline")}>Benchmark offline (golden set)</Button>
-          <Button variant={tab === "benchmark_batch" ? "default" : "outline"} onClick={() => setTab("benchmark_batch")}>Benchmark Batch</Button>
-        </CardContent>
-      </Card>
+    <div className="space-y-6 pb-8">
+      <section className="overflow-hidden rounded-2xl border border-lime-300/20 bg-gradient-to-br from-slate-950 via-[#0b1220] to-lime-950/40 shadow-xl shadow-lime-950/20">
+        <div className="border-b border-white/5 px-5 py-5 sm:px-6">
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <div className="flex items-center gap-2">
+                <Sparkles className="h-5 w-5 text-lime-300" />
+                <h1 className="font-heading text-xl font-semibold tracking-tight text-white sm:text-2xl">Calidad IA</h1>
+              </div>
+              <p className="mt-2 max-w-2xl text-sm text-slate-300">
+                Observabilidad del pipeline, benchmarks offline y ejecución batch con analista IA.
+              </p>
+            </div>
+            <Badge className="border-lime-300/30 bg-lime-500/10 text-lime-100">{account}</Badge>
+          </div>
+        </div>
+        <div className="grid gap-3 p-5 sm:grid-cols-2 lg:grid-cols-3 sm:p-6">
+          <QualityTabButton
+            active={tab === "observabilidad"}
+            onClick={() => setTab("observabilidad")}
+            icon={<Activity className="h-4 w-4" />}
+            label="Observabilidad"
+            description="Salud operativa, alertas y deriva"
+          />
+          <QualityTabButton
+            active={tab === "benchmark_offline"}
+            onClick={() => setTab("benchmark_offline")}
+            icon={<Target className="h-4 w-4" />}
+            label="Benchmark offline"
+            description="Golden set sobre jobs históricos"
+          />
+          <QualityTabButton
+            active={tab === "benchmark_batch"}
+            onClick={() => setTab("benchmark_batch")}
+            icon={<BarChart3 className="h-4 w-4" />}
+            label="Benchmark batch"
+            description="Lotes, historial e IA analista"
+          />
+        </div>
+      </section>
 
       {tab === "observabilidad" ? (
         <>
-          <Card className="border-white/10 bg-white/5 backdrop-blur">
-            <CardHeader><CardTitle>Filtros de observabilidad</CardTitle></CardHeader>
-            <CardContent className="grid gap-3 md:grid-cols-4">
-              <div className="space-y-2"><Label>account_name</Label><Input value={obsForm.account_name} onChange={(e) => setObsForm((p) => ({ ...p, account_name: e.target.value }))} /></div>
-              <div className="space-y-2"><Label>created_from</Label><Input type="date" value={obsForm.created_from} onChange={(e) => setObsForm((p) => ({ ...p, created_from: e.target.value }))} /></div>
-              <div className="space-y-2"><Label>created_to</Label><Input type="date" value={obsForm.created_to} onChange={(e) => setObsForm((p) => ({ ...p, created_to: e.target.value }))} /></div>
-              <div className="space-y-2"><Label>limit_jobs</Label><Input value={obsForm.limit_jobs} onChange={(e) => setObsForm((p) => ({ ...p, limit_jobs: e.target.value }))} /></div>
-              <div className="space-y-2"><Label>alert_needs_review_rate</Label><Input value={obsForm.alert_needs_review_rate} onChange={(e) => setObsForm((p) => ({ ...p, alert_needs_review_rate: e.target.value }))} /></div>
-              <div className="space-y-2"><Label>alert_llm_ok_rate_drop_below</Label><Input value={obsForm.alert_llm_ok_rate_drop_below} onChange={(e) => setObsForm((p) => ({ ...p, alert_llm_ok_rate_drop_below: e.target.value }))} /></div>
-              <div className="space-y-2"><Label>alert_llm_fallback_rate_above</Label><Input value={obsForm.alert_llm_fallback_rate_above} onChange={(e) => setObsForm((p) => ({ ...p, alert_llm_fallback_rate_above: e.target.value }))} /></div>
-              <div className="flex items-end"><Button onClick={() => obsMutation.mutate({
+          <Card className="border-white/10 bg-white/5">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <ShieldCheck className="h-4 w-4 text-cyan-300" />
+                Consulta de observabilidad
+              </CardTitle>
+              <CardDescription>Define la ventana de jobs y umbrales de alerta.</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="grid gap-3 md:grid-cols-4">
+                <div className="space-y-2"><Label>Cuenta</Label><Input value={obsForm.account_name} onChange={(e) => setObsForm((p) => ({ ...p, account_name: e.target.value }))} /></div>
+                <div className="space-y-2"><Label>Desde</Label><Input type="date" value={obsForm.created_from} onChange={(e) => setObsForm((p) => ({ ...p, created_from: e.target.value }))} /></div>
+                <div className="space-y-2"><Label>Hasta</Label><Input type="date" value={obsForm.created_to} onChange={(e) => setObsForm((p) => ({ ...p, created_to: e.target.value }))} /></div>
+                <div className="space-y-2"><Label>Límite de jobs</Label><Input value={obsForm.limit_jobs} onChange={(e) => setObsForm((p) => ({ ...p, limit_jobs: e.target.value }))} /></div>
+              </div>
+              <details className="rounded-lg border border-white/10 bg-black/20 p-3">
+                <summary className="cursor-pointer text-sm font-medium text-slate-200">Umbrales de alerta (avanzado)</summary>
+                <div className="mt-3 grid gap-3 md:grid-cols-3">
+                  <div className="space-y-2"><Label>Needs review máx.</Label><Input value={obsForm.alert_needs_review_rate} onChange={(e) => setObsForm((p) => ({ ...p, alert_needs_review_rate: e.target.value }))} /></div>
+                  <div className="space-y-2"><Label>LLM OK mín.</Label><Input value={obsForm.alert_llm_ok_rate_drop_below} onChange={(e) => setObsForm((p) => ({ ...p, alert_llm_ok_rate_drop_below: e.target.value }))} /></div>
+                  <div className="space-y-2"><Label>Fallback máx.</Label><Input value={obsForm.alert_llm_fallback_rate_above} onChange={(e) => setObsForm((p) => ({ ...p, alert_llm_fallback_rate_above: e.target.value }))} /></div>
+                </div>
+              </details>
+              <Button onClick={() => obsMutation.mutate({
                 account_name: obsForm.account_name,
                 created_from: obsForm.created_from || undefined,
                 created_to: obsForm.created_to || undefined,
@@ -491,22 +697,76 @@ export function AccountQualityPage({ account }: Props) {
                 alert_llm_ok_rate_drop_below: Number(obsForm.alert_llm_ok_rate_drop_below || 0.75),
                 alert_llm_fallback_rate_above: Number(obsForm.alert_llm_fallback_rate_above || 0.3),
                 job_ids: [],
-              })} disabled={obsMutation.isPending}>{obsMutation.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCcw className="mr-2 h-4 w-4" />}Actualizar observabilidad</Button></div>
+              })} disabled={obsMutation.isPending}>
+                {obsMutation.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCcw className="mr-2 h-4 w-4" />}
+                Actualizar observabilidad
+              </Button>
             </CardContent>
           </Card>
-          {!obsRan ? <Card className="border-white/10 bg-white/5 backdrop-blur"><CardContent className="py-4 text-sm text-muted-foreground">Configura filtros y ejecuta consulta.</CardContent></Card> : null}
-          {obsMutation.error instanceof HttpError ? <Card className="border-rose-300/30 bg-rose-500/10"><CardContent className="py-4 text-sm text-rose-200">Error: {obsMutation.error.detail}</CardContent></Card> : null}
+          {!obsRan ? <EmptyState title="Sin consulta aún" description="Configura filtros y pulsa Actualizar observabilidad." /> : null}
+          {obsMutation.error instanceof HttpError ? (
+            <Card className="border-rose-300/30 bg-rose-500/10"><CardContent className="py-4 text-sm text-rose-200">Error: {obsMutation.error.detail}</CardContent></Card>
+          ) : null}
           {obsData ? (
             <>
-              <div className="grid gap-3 md:grid-cols-4">
-                <Card className="border-white/10 bg-white/5 backdrop-blur"><CardContent className="py-4"><p className="text-xs text-muted-foreground">needs_review_rate</p><p className="text-xl font-semibold">{pct(obsData.summary.needs_review_rate)}</p></CardContent></Card>
-                <Card className="border-white/10 bg-white/5 backdrop-blur"><CardContent className="py-4"><p className="text-xs text-muted-foreground">invention_rate_proxy</p><p className="text-xl font-semibold">{pct(obsData.summary.invention_rate_proxy)}</p></CardContent></Card>
-                <Card className="border-white/10 bg-white/5 backdrop-blur"><CardContent className="py-4"><p className="text-xs text-muted-foreground">llm_ok_rate</p><p className="text-xl font-semibold">{pct(obsData.summary.llm_ok_rate)}</p></CardContent></Card>
-                <Card className="border-white/10 bg-white/5 backdrop-blur"><CardContent className="py-4"><p className="text-xs text-muted-foreground">llm_fallback_rate</p><p className="text-xl font-semibold">{pct(obsData.summary.llm_fallback_rate)}</p></CardContent></Card>
+              <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+                <QualityKpiCard label="Needs review" value={pct(obsData.summary.needs_review_rate)} accent="from-cyan-500/10" bar={obsData.summary.needs_review_rate} barClass="bg-cyan-400" />
+                <QualityKpiCard label="Invention proxy" value={pct(obsData.summary.invention_rate_proxy)} accent="from-rose-500/10" bar={obsData.summary.invention_rate_proxy} barClass="bg-rose-400" />
+                <QualityKpiCard label="LLM OK" value={pct(obsData.summary.llm_ok_rate)} accent="from-emerald-500/10" bar={obsData.summary.llm_ok_rate} barClass="bg-emerald-400" />
+                <QualityKpiCard label="LLM fallback" value={pct(obsData.summary.llm_fallback_rate)} accent="from-amber-500/10" bar={obsData.summary.llm_fallback_rate} barClass="bg-amber-400" />
+                <QualityKpiCard label="Filas analizadas" value={String(obsData.summary.total_rows)} hint="En la ventana" accent="from-violet-500/10" />
               </div>
-              <Card className="border-white/10 bg-white/5 backdrop-blur"><CardHeader><CardTitle>Alertas</CardTitle></CardHeader><CardContent className="space-y-2">{(obsData.alerts ?? []).length ? obsData.alerts.map((a, i) => <div key={`al-${i}`} className="flex items-start gap-2 rounded-md border border-amber-300/30 bg-amber-500/10 p-2 text-sm"><AlertTriangle className="mt-0.5 h-4 w-4 text-amber-300" /><div><p className="font-medium">{a.code}</p><p>{a.message}</p></div></div>) : <Badge>Sin alertas</Badge>}</CardContent></Card>
-              <Card className="border-white/10 bg-white/5 backdrop-blur"><CardHeader><CardTitle>Latencia por etapa</CardTitle></CardHeader><CardContent className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>step</TableHead><TableHead>count</TableHead><TableHead>avg_ms</TableHead><TableHead>p95_ms</TableHead><TableHead>p99_ms</TableHead></TableRow></TableHeader><TableBody>{sortedLatency.map((r) => <TableRow key={`l-${r.step}`}><TableCell>{r.step}</TableCell><TableCell>{r.count}</TableCell><TableCell>{Math.round(r.avg_ms)}</TableCell><TableCell>{Math.round(r.p95_ms)}</TableCell><TableCell>{Math.round(r.p99_ms)}</TableCell></TableRow>)}</TableBody></Table></CardContent></Card>
-              <Card className="border-white/10 bg-white/5 backdrop-blur"><CardHeader><CardTitle>Drift por cadena/categoría</CardTitle></CardHeader><CardContent className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>chain_category</TableHead><TableHead>rows</TableHead><TableHead>needs_review_rate</TableHead><TableHead>semáforo</TableHead></TableRow></TableHeader><TableBody>{(obsData.drift_chain_category ?? []).map((r, i) => <TableRow key={`d-${i}`}><TableCell>{r.chain_category}</TableCell><TableCell>{r.rows}</TableCell><TableCell>{pct(r.needs_review_rate)}</TableCell><TableCell>{driftBadge(r.needs_review_rate)}</TableCell></TableRow>)}</TableBody></Table></CardContent></Card>
+              <div className="grid gap-4 xl:grid-cols-2">
+                <Card className="border-white/10 bg-white/5">
+                  <CardHeader><CardTitle className="text-base">Alertas operativas</CardTitle></CardHeader>
+                  <CardContent className="space-y-2">
+                    {(obsData.alerts ?? []).length ? obsData.alerts.map((a, i) => (
+                      <div key={`al-${i}`} className="flex items-start gap-2 rounded-md border border-amber-300/30 bg-amber-500/10 p-3 text-sm">
+                        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-300" />
+                        <div><p className="font-medium text-amber-100">{a.code}</p><p className="text-amber-50/90">{a.message}</p></div>
+                      </div>
+                    )) : (
+                      <div className="rounded-md border border-emerald-400/30 bg-emerald-500/10 p-3 text-sm text-emerald-100">Sin alertas en la ventana actual.</div>
+                    )}
+                  </CardContent>
+                </Card>
+                <Card className="border-white/10 bg-white/5">
+                  <CardHeader><CardTitle className="text-base">Latencia por etapa (p95)</CardTitle></CardHeader>
+                  <CardContent className="space-y-3">
+                    {sortedLatency.slice(0, 6).map((row) => (
+                      <div key={`l-${row.step}`}>
+                        <div className="mb-1 flex items-center justify-between text-xs">
+                          <span className="text-slate-300">{toTitleCase(row.step)}</span>
+                          <span className="font-mono text-slate-400">{Math.round(row.p95_ms)} ms</span>
+                        </div>
+                        <div className="h-2 overflow-hidden rounded-full bg-slate-800">
+                          <div
+                            className="h-full rounded-full bg-gradient-to-r from-cyan-500 to-cyan-300"
+                            style={{ width: `${Math.min(100, Math.max(6, (row.p95_ms / Math.max(sortedLatency[0]?.p95_ms || 1, 1)) * 100))}%` }}
+                          />
+                        </div>
+                      </div>
+                    ))}
+                  </CardContent>
+                </Card>
+              </div>
+              <Card className="border-white/10 bg-white/5">
+                <CardHeader><CardTitle className="text-base">Deriva por cadena / categoría</CardTitle></CardHeader>
+                <CardContent>
+                  <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                    {(obsData.drift_chain_category ?? []).map((row, i) => (
+                      <div key={`d-${i}`} className="rounded-lg border border-white/10 bg-black/20 p-3">
+                        <div className="mb-2 flex items-center justify-between gap-2 text-xs">
+                          <span className="font-medium text-slate-200">{row.chain_category}</span>
+                          <span className="text-slate-500">{row.rows} filas</span>
+                        </div>
+                        <MetricBarRow label="Needs review" value={row.needs_review_rate} tone="bg-fuchsia-400" />
+                        <div className="mt-2">{driftBadge(row.needs_review_rate)}</div>
+                      </div>
+                    ))}
+                  </div>
+                </CardContent>
+              </Card>
             </>
           ) : null}
         </>
@@ -514,15 +774,25 @@ export function AccountQualityPage({ account }: Props) {
 
       {tab === "benchmark_offline" ? (
         <>
-          <Card className="border-white/10 bg-white/5 backdrop-blur">
-            <CardHeader><CardTitle>Benchmark offline</CardTitle></CardHeader>
-            <CardContent className="grid gap-3 md:grid-cols-3">
-              <div className="space-y-2"><Label>account_name</Label><Input value={offlineForm.account_name} onChange={(e) => setOfflineForm((p) => ({ ...p, account_name: e.target.value }))} /></div>
-              <div className="space-y-2 md:col-span-2"><Label>golden_path</Label><Input value={offlineForm.golden_path} onChange={(e) => setOfflineForm((p) => ({ ...p, golden_path: e.target.value }))} /></div>
-              <div className="space-y-2"><Label>created_from</Label><Input type="date" value={offlineForm.created_from} onChange={(e) => setOfflineForm((p) => ({ ...p, created_from: e.target.value }))} /></div>
-              <div className="space-y-2"><Label>created_to</Label><Input type="date" value={offlineForm.created_to} onChange={(e) => setOfflineForm((p) => ({ ...p, created_to: e.target.value }))} /></div>
-              <div className="space-y-2"><Label>limit_jobs</Label><Input value={offlineForm.limit_jobs} onChange={(e) => setOfflineForm((p) => ({ ...p, limit_jobs: e.target.value }))} /></div>
-              <div className="flex items-end"><Button onClick={() => {
+          <Card className="border-white/10 bg-white/5">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2"><FlaskConical className="h-4 w-4 text-amber-300" />Benchmark offline (golden set)</CardTitle>
+              <CardDescription>Evalúa jobs históricos contra un golden path sin subir imágenes nuevas.</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="flex flex-wrap gap-4">
+                <StepBadge step={1} label="Golden path" />
+                <StepBadge step={2} label="Ventana temporal" />
+                <StepBadge step={3} label="Ejecutar" />
+              </div>
+              <div className="grid gap-3 md:grid-cols-3">
+                <div className="space-y-2"><Label>Cuenta</Label><Input value={offlineForm.account_name} onChange={(e) => setOfflineForm((p) => ({ ...p, account_name: e.target.value }))} /></div>
+                <div className="space-y-2 md:col-span-2"><Label>Golden path</Label><Input placeholder="ruta/al/golden.json" value={offlineForm.golden_path} onChange={(e) => setOfflineForm((p) => ({ ...p, golden_path: e.target.value }))} /></div>
+                <div className="space-y-2"><Label>Desde</Label><Input type="date" value={offlineForm.created_from} onChange={(e) => setOfflineForm((p) => ({ ...p, created_from: e.target.value }))} /></div>
+                <div className="space-y-2"><Label>Hasta</Label><Input type="date" value={offlineForm.created_to} onChange={(e) => setOfflineForm((p) => ({ ...p, created_to: e.target.value }))} /></div>
+                <div className="space-y-2"><Label>Límite jobs</Label><Input value={offlineForm.limit_jobs} onChange={(e) => setOfflineForm((p) => ({ ...p, limit_jobs: e.target.value }))} /></div>
+              </div>
+              <Button onClick={() => {
                 if (!offlineForm.golden_path.trim()) return toast.error("golden_path es requerido");
                 offlineMutation.mutate({
                   account_name: offlineForm.account_name,
@@ -532,72 +802,134 @@ export function AccountQualityPage({ account }: Props) {
                   limit_jobs: Number(offlineForm.limit_jobs || 500),
                   job_ids: [],
                 });
-              }} disabled={offlineMutation.isPending}>{offlineMutation.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCcw className="mr-2 h-4 w-4" />}Ejecutar benchmark</Button></div>
+              }} disabled={offlineMutation.isPending}>
+                {offlineMutation.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Play className="mr-2 h-4 w-4" />}
+                Ejecutar benchmark offline
+              </Button>
             </CardContent>
           </Card>
-          {!offlineRan ? <Card className="border-white/10 bg-white/5 backdrop-blur"><CardContent className="py-4 text-sm text-muted-foreground">Completa golden_path y ejecuta benchmark.</CardContent></Card> : null}
+          {!offlineRan ? <EmptyState title="Benchmark no ejecutado" description="Indica el golden path y lanza la evaluación offline." /> : null}
           {offlineData ? (
-            <Card className="border-white/10 bg-white/5 backdrop-blur">
-              <CardHeader><CardTitle>Resultado benchmark</CardTitle></CardHeader>
-              <CardContent className="space-y-3">
-                <div className="grid gap-3 md:grid-cols-3">
-                  <div><p className="text-xs text-muted-foreground">checked</p><p>{offlineData.metrics.checked}</p></div>
-                  <div><p className="text-xs text-muted-foreground">exactitud_nombre</p><p>{pct(offlineData.metrics.exactitud_nombre)}</p></div>
-                  <div><p className="text-xs text-muted-foreground">exactitud_promo_precio</p><p>{pct(offlineData.metrics.exactitud_promo_precio)}</p></div>
-                </div>
-                <div className="overflow-x-auto"><Table><TableHeader><TableRow><TableHead>key</TableHead><TableHead>reason</TableHead></TableRow></TableHeader><TableBody>{pagedMisses.map((m, i) => <TableRow key={`m-${i}`}><TableCell>{m.key}</TableCell><TableCell>{m.reason}</TableCell></TableRow>)}</TableBody></Table></div>
-                <div className="flex justify-end gap-2"><Button size="sm" variant="outline" disabled={missOffset === 0} onClick={() => setMissOffset((x) => Math.max(0, x - 10))}>Anterior</Button><Button size="sm" variant="outline" disabled={missOffset + 10 >= misses.length} onClick={() => setMissOffset((x) => x + 10)}>Siguiente</Button></div>
-              </CardContent>
-            </Card>
+            <>
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
+                <QualityKpiCard label="Revisados" value={String(offlineData.metrics.checked)} accent="from-slate-500/10" />
+                <QualityKpiCard label="Exactitud nombre" value={pct(offlineData.metrics.exactitud_nombre)} accent="from-emerald-500/10" bar={offlineData.metrics.exactitud_nombre} barClass="bg-emerald-400" />
+                <QualityKpiCard label="Exactitud promo/precio" value={pct(offlineData.metrics.exactitud_promo_precio)} accent="from-lime-500/10" bar={offlineData.metrics.exactitud_promo_precio} barClass="bg-lime-400" />
+                <QualityKpiCard label="Recall productos" value={pct(offlineData.metrics.recall_productos_validos)} accent="from-cyan-500/10" bar={offlineData.metrics.recall_productos_validos} barClass="bg-cyan-400" />
+                <QualityKpiCard label="Needs review" value={pct(offlineData.metrics.tasa_needs_review)} accent="from-amber-500/10" bar={offlineData.metrics.tasa_needs_review} barClass="bg-amber-400" />
+                <QualityKpiCard label="Invention proxy" value={pct(offlineData.metrics.tasa_invento_proxy)} accent="from-rose-500/10" bar={offlineData.metrics.tasa_invento_proxy} barClass="bg-rose-400" />
+              </div>
+              <Card className="border-white/10 bg-white/5">
+                <CardHeader>
+                  <CardTitle className="text-base">Misses ({misses.length})</CardTitle>
+                  <CardDescription>Casos que no pasaron la validación contra golden.</CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  <div className="overflow-x-auto rounded-lg border border-white/10">
+                    <Table>
+                      <TableHeader><TableRow><TableHead>Clave</TableHead><TableHead>Motivo</TableHead></TableRow></TableHeader>
+                      <TableBody>
+                        {pagedMisses.map((m, i) => (
+                          <TableRow key={`m-${i}`}><TableCell className="font-mono text-xs">{m.key}</TableCell><TableCell>{m.reason}</TableCell></TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-xs text-slate-400">{missOffset + 1}–{Math.min(missOffset + 10, misses.length)} de {misses.length}</p>
+                    <div className="flex gap-2">
+                      <Button size="sm" variant="outline" disabled={missOffset === 0} onClick={() => setMissOffset((x) => Math.max(0, x - 10))}>Anterior</Button>
+                      <Button size="sm" variant="outline" disabled={missOffset + 10 >= misses.length} onClick={() => setMissOffset((x) => x + 10)}>Siguiente</Button>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            </>
           ) : null}
         </>
       ) : null}
 
       {tab === "benchmark_batch" ? (
         <div className="space-y-4">
-          <Card className="border-white/10 bg-white/5 backdrop-blur">
-            <CardHeader><CardTitle>Benchmark Batch</CardTitle></CardHeader>
+          <Card className="border-white/10 bg-white/5">
+            <CardHeader className="pb-2">
+              <CardTitle className="flex items-center gap-2"><BarChart3 className="h-4 w-4 text-lime-300" />Benchmark batch</CardTitle>
+              <CardDescription>Ejecuta lotes, revisa historial y lanza el analista IA sobre reportes.</CardDescription>
+            </CardHeader>
             <CardContent className="flex flex-wrap gap-2">
-              <Button variant={batchTab === "ejecutar" ? "default" : "outline"} onClick={() => setBatchTab("ejecutar")}>Ejecutar</Button>
-              <Button variant={batchTab === "historial" ? "default" : "outline"} onClick={() => setBatchTab("historial")}>Historial Benchmark</Button>
-              <Button variant={batchTab === "ia" ? "default" : "outline"} onClick={() => setBatchTab("ia")}>IA Analista</Button>
+              <QualitySubTab active={batchTab === "ejecutar"} onClick={() => setBatchTab("ejecutar")}><Play className="mr-1 inline h-3.5 w-3.5" />Ejecutar</QualitySubTab>
+              <QualitySubTab active={batchTab === "historial"} onClick={() => setBatchTab("historial")}><History className="mr-1 inline h-3.5 w-3.5" />Historial</QualitySubTab>
+              <QualitySubTab active={batchTab === "ia"} onClick={() => setBatchTab("ia")}><Bot className="mr-1 inline h-3.5 w-3.5" />IA Analista</QualitySubTab>
             </CardContent>
           </Card>
 
           {batchTab === "historial" ? (
-            <Card className="border-white/10 bg-white/5 backdrop-blur">
-              <CardHeader><CardTitle>Historial Benchmark</CardTitle></CardHeader>
-              <CardContent className="overflow-x-auto">
-                <Table><TableHeader><TableRow><TableHead>benchmark_id</TableHead><TableHead>job_id</TableHead><TableHead>mode</TableHead><TableHead>job_status</TableHead><TableHead>total_images</TableHead><TableHead>created_at</TableHead><TableHead>acción</TableHead></TableRow></TableHeader><TableBody>{(benchmarkHistoryQuery.data ?? []).map((r) => <TableRow key={r.benchmark_id}><TableCell className="font-mono text-xs">{r.benchmark_id}</TableCell><TableCell className="font-mono text-xs">{r.job_id}</TableCell><TableCell>{r.mode}</TableCell><TableCell>{r.status}</TableCell><TableCell>{r.total_images ?? 0}</TableCell><TableCell>{r.created_at ?? "-"}</TableCell><TableCell><Button size="sm" variant="outline" onClick={() => { setSelectedBenchmarkId(r.benchmark_id); setBatchTab("ia"); setIaTab("ejecutar"); }}>Abrir</Button></TableCell></TableRow>)}</TableBody></Table>
+            <Card className="border-white/10 bg-white/5">
+              <CardHeader>
+                <CardTitle className="text-base">Historial de benchmarks</CardTitle>
+                <CardDescription>Últimos 50 runs de la cuenta. Abre uno para analizarlo con IA.</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-2">
+                {benchmarkHistoryQuery.isLoading ? <p className="text-sm text-slate-400">Cargando historial…</p> : null}
+                {(benchmarkHistoryQuery.data ?? []).map((row) => (
+                  <div key={row.benchmark_id} className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-white/10 bg-black/20 px-3 py-3">
+                    <div className="min-w-0 flex-1">
+                      <p className="font-mono text-xs text-slate-100">{row.benchmark_id}</p>
+                      <p className="mt-1 text-[11px] text-slate-400">
+                        Job {row.job_id} · {toTitleCase(row.mode)} · {row.total_images ?? 0} imgs
+                      </p>
+                      <p className="mt-0.5 text-[10px] text-slate-500">{row.created_at ?? "—"}</p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {benchmarkStatusBadge(row.status)}
+                      <Button size="sm" variant="outline" onClick={() => { setSelectedBenchmarkId(row.benchmark_id); setBatchTab("ia"); setIaTab("ejecutar"); }}>
+                        Abrir <ChevronRight className="ml-1 h-3.5 w-3.5" />
+                      </Button>
+                    </div>
+                  </div>
+                ))}
+                {!benchmarkHistoryQuery.isLoading && !(benchmarkHistoryQuery.data ?? []).length ? (
+                  <EmptyState title="Sin benchmarks" description="Ejecuta un batch para ver historial aquí." />
+                ) : null}
               </CardContent>
             </Card>
           ) : null}
 
           {batchTab === "ia" ? (
-            <Card className="border-white/10 bg-white/5 backdrop-blur">
-              <CardHeader><CardTitle>IA Analista</CardTitle></CardHeader>
-              <CardContent className="space-y-3">
-                <div className="grid gap-3 md:grid-cols-3">
-                  <div className="space-y-2 md:col-span-2"><Label>benchmark_id</Label><Input value={selectedBenchmarkId} onChange={(e) => setSelectedBenchmarkId(e.target.value)} /></div>
-                  <div className="flex items-end"><Button variant="outline" onClick={() => { if (selectedBenchmarkId) selectedBenchmarkReportQuery.refetch(); }}>Cargar reporte</Button></div>
+            <Card className="border-white/10 bg-white/5">
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2"><Bot className="h-4 w-4 text-violet-300" />IA Analista</CardTitle>
+                <CardDescription>Prompts, ejecución async, resultados y efectividad del analista sobre benchmarks.</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="rounded-lg border border-violet-400/20 bg-violet-500/10 p-3">
+                  <div className="grid gap-3 md:grid-cols-[1fr_auto]">
+                    <div className="space-y-2">
+                      <Label>Benchmark seleccionado</Label>
+                      <Input className="font-mono text-xs" placeholder="benchmark_id" value={selectedBenchmarkId} onChange={(e) => setSelectedBenchmarkId(e.target.value)} />
+                    </div>
+                    <div className="flex items-end">
+                      <Button variant="outline" onClick={() => { if (selectedBenchmarkId) selectedBenchmarkReportQuery.refetch(); }}>Cargar reporte</Button>
+                    </div>
+                  </div>
                 </div>
                 <div className="flex flex-wrap gap-2">
-                  <Button variant={iaTab === "prompt" ? "default" : "outline"} onClick={() => setIaTab("prompt")}>Prompt</Button>
-                  <Button variant={iaTab === "ejecutar" ? "default" : "outline"} onClick={() => setIaTab("ejecutar")}>Ejecutar</Button>
-                  <Button variant={iaTab === "resultado" ? "default" : "outline"} onClick={() => setIaTab("resultado")}>Resultado</Button>
-                  <Button variant={iaTab === "historial" ? "default" : "outline"} onClick={() => setIaTab("historial")}>Historial IA</Button>
-                  <Button variant={iaTab === "efectividad" ? "default" : "outline"} onClick={() => setIaTab("efectividad")}>Efectividad</Button>
+                  <QualitySubTab active={iaTab === "prompt"} onClick={() => setIaTab("prompt")}>Prompt</QualitySubTab>
+                  <QualitySubTab active={iaTab === "ejecutar"} onClick={() => setIaTab("ejecutar")}>Ejecutar</QualitySubTab>
+                  <QualitySubTab active={iaTab === "resultado"} onClick={() => setIaTab("resultado")}>Resultado</QualitySubTab>
+                  <QualitySubTab active={iaTab === "historial"} onClick={() => setIaTab("historial")}>Historial IA</QualitySubTab>
+                  <QualitySubTab active={iaTab === "efectividad"} onClick={() => setIaTab("efectividad")}>Efectividad</QualitySubTab>
                 </div>
                 {iaTab === "efectividad" ? <Card className="border-white/10 bg-black/20">
-                  <CardHeader><CardTitle className="text-base">Efectividad IA</CardTitle></CardHeader>
-                  <CardContent className="space-y-3">
-                    <div className="grid gap-3 md:grid-cols-6">
-                      <div><p className="text-xs text-muted-foreground">success_rate</p><p>{pct(aiEffectivenessQuery.data?.summary.success_rate ?? 0)}</p></div>
-                      <div><p className="text-xs text-muted-foreground">empty_rate</p><p>{pct(aiEffectivenessQuery.data?.summary.empty_rate ?? 0)}</p></div>
-                      <div><p className="text-xs text-muted-foreground">parse_error_rate</p><p>{pct(aiEffectivenessQuery.data?.summary.parse_error_rate ?? 0)}</p></div>
-                      <div><p className="text-xs text-muted-foreground">hard_error_rate</p><p>{pct(aiEffectivenessQuery.data?.summary.hard_error_rate ?? 0)}</p></div>
-                      <div><p className="text-xs text-muted-foreground">avg_success_score</p><p>{(aiEffectivenessQuery.data?.summary.avg_success_score ?? 0).toFixed(2)}</p></div>
-                      <div><p className="text-xs text-muted-foreground">total_reviews</p><p>{aiEffectivenessQuery.data?.summary.total_reviews ?? 0}</p></div>
+                  <CardHeader><CardTitle className="text-base">Efectividad del analista IA</CardTitle></CardHeader>
+                  <CardContent className="space-y-4">
+                    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
+                      <QualityKpiCard label="Success rate" value={pct(aiEffectivenessQuery.data?.summary.success_rate ?? 0)} accent="from-emerald-500/10" bar={aiEffectivenessQuery.data?.summary.success_rate} barClass="bg-emerald-400" />
+                      <QualityKpiCard label="Empty rate" value={pct(aiEffectivenessQuery.data?.summary.empty_rate ?? 0)} accent="from-slate-500/10" bar={aiEffectivenessQuery.data?.summary.empty_rate} barClass="bg-slate-400" />
+                      <QualityKpiCard label="Parse errors" value={pct(aiEffectivenessQuery.data?.summary.parse_error_rate ?? 0)} accent="from-amber-500/10" bar={aiEffectivenessQuery.data?.summary.parse_error_rate} barClass="bg-amber-400" />
+                      <QualityKpiCard label="Hard errors" value={pct(aiEffectivenessQuery.data?.summary.hard_error_rate ?? 0)} accent="from-rose-500/10" bar={aiEffectivenessQuery.data?.summary.hard_error_rate} barClass="bg-rose-400" />
+                      <QualityKpiCard label="Avg score" value={(aiEffectivenessQuery.data?.summary.avg_success_score ?? 0).toFixed(2)} accent="from-violet-500/10" />
+                      <QualityKpiCard label="Reviews" value={String(aiEffectivenessQuery.data?.summary.total_reviews ?? 0)} accent="from-cyan-500/10" />
                     </div>
                     <div className="overflow-x-auto">
                       <Table><TableHeader><TableRow><TableHead>model</TableHead><TableHead>success</TableHead><TableHead>empty</TableHead><TableHead>parse</TableHead><TableHead>hard</TableHead><TableHead>avg_score</TableHead></TableRow></TableHeader><TableBody>{(aiEffectivenessQuery.data?.by_model ?? []).map((r) => <TableRow key={`eff-${r.model}`}><TableCell>{r.model}</TableCell><TableCell>{pct(r.success_rate)}</TableCell><TableCell>{pct(r.empty_rate)}</TableCell><TableCell>{pct(r.parse_error_rate)}</TableCell><TableCell>{pct(r.hard_error_rate)}</TableCell><TableCell>{r.avg_success_score.toFixed(2)}</TableCell></TableRow>)}</TableBody></Table>
@@ -798,50 +1130,137 @@ export function AccountQualityPage({ account }: Props) {
 
           {batchTab === "ejecutar" ? (
             <>
-              <Card className="border-white/10 bg-white/5 backdrop-blur">
-                <CardHeader><CardTitle>Configuración y ejecución</CardTitle></CardHeader>
-                <CardContent className="space-y-4">
-                  <div className="grid gap-3 md:grid-cols-3">
-                    <div className="space-y-2"><Label>account_name</Label><Input value={batchForm.account_name} onChange={(e) => setBatchForm((p) => ({ ...p, account_name: e.target.value }))} /></div>
-                    <div className="space-y-2"><Label>config_name</Label><Input value={batchForm.config_name} onChange={(e) => setBatchForm((p) => ({ ...p, config_name: e.target.value }))} /></div>
-                    <div className="space-y-2"><Label>mode</Label><select className="h-10 w-full rounded-md border border-white/10 bg-slate-900 px-3 text-sm" value={batchForm.mode} onChange={(e) => setBatchForm((p) => ({ ...p, mode: e.target.value as "performance_only" | "quality_with_golden" }))}><option value="performance_only">performance_only</option><option value="quality_with_golden">quality_with_golden</option></select></div>
-                    {batchForm.mode === "quality_with_golden" ? <div className="space-y-2 md:col-span-3"><Label>golden_path</Label><Input value={batchForm.golden_path} onChange={(e) => setBatchForm((p) => ({ ...p, golden_path: e.target.value }))} /></div> : null}
-                    <div className="space-y-2"><Label>concurrency</Label><Input value={batchForm.concurrency} onChange={(e) => setBatchForm((p) => ({ ...p, concurrency: e.target.value }))} /></div>
-                    <div className="space-y-2"><Label>max_retries_per_image</Label><Input value={batchForm.max_retries_per_image} onChange={(e) => setBatchForm((p) => ({ ...p, max_retries_per_image: e.target.value }))} /></div>
-                    <div className="space-y-2"><Label>timeout_sec</Label><Input value={batchForm.timeout_sec} onChange={(e) => setBatchForm((p) => ({ ...p, timeout_sec: e.target.value }))} /></div>
-                  </div>
-                  <UploadPanel files={selectedFiles} onFilesChange={setSelectedFiles} onUpload={() => uploadMutation.mutate(selectedFiles)} isUploading={uploadMutation.isPending} />
-                  <UploadedFilesTable uploaded={uploadedItems} />
-                  <Button onClick={() => {
-                    if (!uploadedItems.length) return toast.error("Primero sube imágenes");
-                    if (batchForm.mode === "quality_with_golden" && !batchForm.golden_path.trim()) return toast.error("golden_path es requerido");
-                    createBatchMutation.mutate({
-                      image_paths: [],
-                      image_file_ids: uploadedItems.map((u) => u.file_id),
-                      account_name: batchForm.account_name,
-                      config_name: batchForm.config_name,
-                      mode: batchForm.mode,
-                      golden_path: batchForm.mode === "quality_with_golden" ? batchForm.golden_path.trim() : null,
-                      concurrency: Number(batchForm.concurrency || 2),
-                      max_retries_per_image: Number(batchForm.max_retries_per_image || 1),
-                      timeout_sec: Number(batchForm.timeout_sec || 120),
-                      export_excel: true,
-                      output_name: null,
-                      db_excel: null,
-                      skip_qwen: null,
-                      cadena: null,
-                    });
-                  }} disabled={createBatchMutation.isPending}>{createBatchMutation.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}Iniciar benchmark</Button>
-                </CardContent>
-              </Card>
+              <div className="grid gap-4 xl:grid-cols-12">
+                <Card className="border-white/10 bg-white/5 xl:col-span-7">
+                  <CardHeader>
+                    <CardTitle className="flex items-center gap-2"><Upload className="h-4 w-4 text-cyan-300" />Configurar y lanzar batch</CardTitle>
+                    <CardDescription>Paso 1 configuración · Paso 2 upload · Paso 3 iniciar</CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-5">
+                    <div className="flex flex-wrap gap-4">
+                      <StepBadge step={1} label="Config" />
+                      <StepBadge step={2} label="Imágenes" />
+                      <StepBadge step={3} label="Iniciar" />
+                    </div>
+                    <div className="grid gap-3 md:grid-cols-3">
+                      <div className="space-y-2"><Label>Cuenta</Label><Input value={batchForm.account_name} onChange={(e) => setBatchForm((p) => ({ ...p, account_name: e.target.value }))} /></div>
+                      <div className="space-y-2"><Label>Config</Label><Input value={batchForm.config_name} onChange={(e) => setBatchForm((p) => ({ ...p, config_name: e.target.value }))} /></div>
+                      <div className="space-y-2">
+                        <Label>Modo</Label>
+                        <select className="h-10 w-full rounded-md border border-white/10 bg-slate-900 px-3 text-sm" value={batchForm.mode} onChange={(e) => setBatchForm((p) => ({ ...p, mode: e.target.value as "performance_only" | "quality_with_golden" }))}>
+                          <option value="performance_only">Solo rendimiento</option>
+                          <option value="quality_with_golden">Calidad con golden</option>
+                        </select>
+                      </div>
+                      {batchForm.mode === "quality_with_golden" ? (
+                        <div className="space-y-2 md:col-span-3"><Label>Golden path</Label><Input value={batchForm.golden_path} onChange={(e) => setBatchForm((p) => ({ ...p, golden_path: e.target.value }))} /></div>
+                      ) : null}
+                      <div className="space-y-2"><Label>Concurrencia</Label><Input value={batchForm.concurrency} onChange={(e) => setBatchForm((p) => ({ ...p, concurrency: e.target.value }))} /></div>
+                      <div className="space-y-2"><Label>Reintentos / imagen</Label><Input value={batchForm.max_retries_per_image} onChange={(e) => setBatchForm((p) => ({ ...p, max_retries_per_image: e.target.value }))} /></div>
+                      <div className="space-y-2"><Label>Timeout (s)</Label><Input value={batchForm.timeout_sec} onChange={(e) => setBatchForm((p) => ({ ...p, timeout_sec: e.target.value }))} /></div>
+                    </div>
+                    <UploadPanel files={selectedFiles} onFilesChange={setSelectedFiles} onUpload={() => uploadMutation.mutate(selectedFiles)} isUploading={uploadMutation.isPending} />
+                    <UploadedFilesTable uploaded={uploadedItems} />
+                    <Button onClick={() => {
+                      if (!uploadedItems.length) return toast.error("Primero sube imágenes");
+                      if (batchForm.mode === "quality_with_golden" && !batchForm.golden_path.trim()) return toast.error("golden_path es requerido");
+                      createBatchMutation.mutate({
+                        image_paths: [],
+                        image_file_ids: uploadedItems.map((u) => u.file_id),
+                        account_name: batchForm.account_name,
+                        config_name: batchForm.config_name,
+                        mode: batchForm.mode,
+                        golden_path: batchForm.mode === "quality_with_golden" ? batchForm.golden_path.trim() : null,
+                        concurrency: Number(batchForm.concurrency || 2),
+                        max_retries_per_image: Number(batchForm.max_retries_per_image || 1),
+                        timeout_sec: Number(batchForm.timeout_sec || 120),
+                        export_excel: true,
+                        output_name: null,
+                        db_excel: null,
+                        skip_qwen: null,
+                        cadena: null,
+                      });
+                    }} disabled={createBatchMutation.isPending}>
+                      {createBatchMutation.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Play className="mr-2 h-4 w-4" />}
+                      Iniciar benchmark batch
+                    </Button>
+                  </CardContent>
+                </Card>
+
+                <Card className="border-white/10 bg-white/5 xl:col-span-5">
+                  <CardHeader>
+                    <CardTitle className="text-base">Estado del run</CardTitle>
+                    <CardDescription>{benchmarkCreated ? "Monitoreo en vivo del benchmark activo." : "Aquí verás progreso tras iniciar."}</CardDescription>
+                  </CardHeader>
+                  <CardContent className="space-y-3">
+                    {benchmarkCreated ? (
+                      <>
+                        <div className="rounded-lg border border-cyan-400/25 bg-cyan-500/10 p-3">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <p className="font-mono text-xs text-slate-100">{benchmarkCreated.benchmark_id}</p>
+                            {benchmarkStatusBadge(benchmarkDetailQuery.data?.status ?? benchmarkCreated.status)}
+                          </div>
+                          <p className="mt-2 text-[11px] text-slate-400">Job {benchmarkDetailQuery.data?.job_id ?? benchmarkCreated.job_id}</p>
+                          <p className="text-[11px] text-slate-400">{benchmarkDetailQuery.data?.total_images ?? benchmarkCreated.total_images} imágenes</p>
+                          {batchIsRunning ? (
+                            <div className="mt-3">
+                              <div className="mb-1 flex justify-between text-[10px] text-cyan-200/80">
+                                <span>Procesando…</span>
+                                <span>{benchmarkEventsQuery.data?.length ?? 0} eventos</span>
+                              </div>
+                              <div className="h-1.5 overflow-hidden rounded-full bg-slate-800">
+                                <div className="h-full animate-pulse rounded-full bg-cyan-400" style={{ width: "66%" }} />
+                              </div>
+                            </div>
+                          ) : null}
+                        </div>
+                        <div className="grid grid-cols-2 gap-2 text-xs">
+                          <div className="rounded-md border border-white/10 bg-black/20 p-2"><p className="text-slate-500">Eventos</p><p className="font-semibold text-slate-100">{benchmarkEventsQuery.data?.length ?? 0}</p></div>
+                          <div className="rounded-md border border-white/10 bg-black/20 p-2"><p className="text-slate-500">Métricas</p><p className="font-semibold text-slate-100">{benchmarkMetricsQuery.data?.metrics.length ?? 0}</p></div>
+                        </div>
+                        <Button size="sm" variant="outline" className="w-full" onClick={() => { setSelectedBenchmarkId(benchmarkCreated.benchmark_id); setBatchTab("ia"); setIaTab("ejecutar"); }}>
+                          Analizar con IA <ChevronRight className="ml-1 h-3.5 w-3.5" />
+                        </Button>
+                      </>
+                    ) : (
+                      <EmptyState title="Sin benchmark activo" description="Sube imágenes e inicia un batch para monitorear aquí." />
+                    )}
+                  </CardContent>
+                </Card>
+              </div>
 
               {benchmarkCreated ? (
                 <>
-                  <Card className="border-white/10 bg-white/5 backdrop-blur"><CardHeader><CardTitle>Estado en vivo</CardTitle></CardHeader><CardContent className="grid gap-3 md:grid-cols-5"><div><p className="text-xs text-muted-foreground">benchmark_id</p><p className="font-mono text-xs">{benchmarkCreated.benchmark_id}</p></div><div><p className="text-xs text-muted-foreground">job_id</p><p className="font-mono text-xs">{benchmarkDetailQuery.data?.job_id ?? benchmarkCreated.job_id}</p></div><div><p className="text-xs text-muted-foreground">status</p><p>{benchmarkDetailQuery.data?.status ?? benchmarkCreated.status}</p></div><div><p className="text-xs text-muted-foreground">total</p><p>{benchmarkDetailQuery.data?.total_images ?? benchmarkCreated.total_images}</p></div><div><p className="text-xs text-muted-foreground">eventos/métricas</p><p>{benchmarkEventsQuery.data?.length ?? 0} / {benchmarkMetricsQuery.data?.metrics.length ?? 0}</p></div></CardContent></Card>
-                  <Card className="border-white/10 bg-white/5 backdrop-blur"><CardHeader><CardTitle>Analítica agregada</CardTitle></CardHeader><CardContent className="space-y-2">{benchmarkAnalyticsQuery.data ? <div className="grid gap-3 md:grid-cols-5"><div><p className="text-xs text-muted-foreground">needs_review_rate</p><p>{pct(benchmarkAnalyticsQuery.data.summary?.needs_review_rate ?? 0)}</p></div><div><p className="text-xs text-muted-foreground">invention_rate_proxy</p><p>{pct(benchmarkAnalyticsQuery.data.summary?.invention_rate_proxy ?? 0)}</p></div><div><p className="text-xs text-muted-foreground">llm_ok_rate</p><p>{pct(benchmarkAnalyticsQuery.data.summary?.llm_ok_rate ?? 0)}</p></div><div><p className="text-xs text-muted-foreground">llm_fallback_rate</p><p>{pct(benchmarkAnalyticsQuery.data.summary?.llm_fallback_rate ?? 0)}</p></div><div><p className="text-xs text-muted-foreground">total_rows</p><p>{benchmarkAnalyticsQuery.data.summary?.total_rows ?? 0}</p></div></div> : <p className="text-sm text-muted-foreground">Sin analítica aún.</p>}</CardContent></Card>
-                  <Card className="border-white/10 bg-white/5 backdrop-blur"><CardHeader><CardTitle>Reporte y artefactos</CardTitle></CardHeader><CardContent className="space-y-2"><div className="flex flex-wrap gap-2">{benchmarkReportQuery.data?.artifacts?.master_html_url ? <a href={benchmarkReportQuery.data.artifacts.master_html_url} target="_blank" rel="noreferrer"><Button size="sm">Master HTML</Button></a> : null}{benchmarkReportQuery.data?.artifacts?.master_json_url ? <a href={benchmarkReportQuery.data.artifacts.master_json_url} target="_blank" rel="noreferrer"><Button size="sm" variant="outline">Master JSON</Button></a> : null}{benchmarkReportQuery.data?.artifacts?.excel_url ? <a href={benchmarkReportQuery.data.artifacts.excel_url} target="_blank" rel="noreferrer"><Button size="sm" variant="outline">Excel</Button></a> : null}<Button size="sm" variant="outline" onClick={async () => { await navigator.clipboard.writeText(JSON.stringify(benchmarkReportQuery.data ?? {}, null, 2)); toast.success("Reporte copiado"); }}>Copiar JSON reporte</Button><Button size="sm" variant="outline" onClick={() => downloadJson("benchmark_report.json", benchmarkReportQuery.data ?? {})}><Download className="mr-2 h-4 w-4" />Descargar JSON</Button></div></CardContent></Card>
+                  <Card className="border-white/10 bg-white/5">
+                    <CardHeader><CardTitle className="text-base">Analítica agregada</CardTitle></CardHeader>
+                    <CardContent>
+                      {benchmarkAnalyticsQuery.data ? (
+                        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+                          <QualityKpiCard label="Needs review" value={pct(benchmarkAnalyticsQuery.data.summary?.needs_review_rate ?? 0)} accent="from-cyan-500/10" bar={benchmarkAnalyticsQuery.data.summary?.needs_review_rate} barClass="bg-cyan-400" />
+                          <QualityKpiCard label="Invention" value={pct(benchmarkAnalyticsQuery.data.summary?.invention_rate_proxy ?? 0)} accent="from-rose-500/10" bar={benchmarkAnalyticsQuery.data.summary?.invention_rate_proxy} barClass="bg-rose-400" />
+                          <QualityKpiCard label="LLM OK" value={pct(benchmarkAnalyticsQuery.data.summary?.llm_ok_rate ?? 0)} accent="from-emerald-500/10" bar={benchmarkAnalyticsQuery.data.summary?.llm_ok_rate} barClass="bg-emerald-400" />
+                          <QualityKpiCard label="Fallback" value={pct(benchmarkAnalyticsQuery.data.summary?.llm_fallback_rate ?? 0)} accent="from-amber-500/10" bar={benchmarkAnalyticsQuery.data.summary?.llm_fallback_rate} barClass="bg-amber-400" />
+                          <QualityKpiCard label="Filas" value={String(benchmarkAnalyticsQuery.data.summary?.total_rows ?? 0)} accent="from-violet-500/10" />
+                        </div>
+                      ) : (
+                        <p className="text-sm text-slate-400">Sin analítica aún — el benchmark puede estar en curso.</p>
+                      )}
+                    </CardContent>
+                  </Card>
+                  <Card className="border-white/10 bg-white/5">
+                    <CardHeader><CardTitle className="text-base">Reporte y artefactos</CardTitle></CardHeader>
+                    <CardContent className="space-y-2">
+                      <div className="flex flex-wrap gap-2">
+                        {benchmarkReportQuery.data?.artifacts?.master_html_url ? <a href={benchmarkReportQuery.data.artifacts.master_html_url} target="_blank" rel="noreferrer"><Button size="sm">Master HTML</Button></a> : null}
+                        {benchmarkReportQuery.data?.artifacts?.master_json_url ? <a href={benchmarkReportQuery.data.artifacts.master_json_url} target="_blank" rel="noreferrer"><Button size="sm" variant="outline">Master JSON</Button></a> : null}
+                        {benchmarkReportQuery.data?.artifacts?.excel_url ? <a href={benchmarkReportQuery.data.artifacts.excel_url} target="_blank" rel="noreferrer"><Button size="sm" variant="outline">Excel</Button></a> : null}
+                        <Button size="sm" variant="outline" onClick={async () => { await navigator.clipboard.writeText(JSON.stringify(benchmarkReportQuery.data ?? {}, null, 2)); toast.success("Reporte copiado"); }}>Copiar JSON</Button>
+                        <Button size="sm" variant="outline" onClick={() => downloadJson("benchmark_report.json", benchmarkReportQuery.data ?? {})}><Download className="mr-2 h-4 w-4" />Descargar</Button>
+                      </div>
+                    </CardContent>
+                  </Card>
                 </>
-              ) : <Card className="border-white/10 bg-white/5 backdrop-blur"><CardContent className="py-4 text-sm text-muted-foreground">Sin benchmark creado aún.</CardContent></Card>}
+              ) : null}
             </>
           ) : null}
         </div>
