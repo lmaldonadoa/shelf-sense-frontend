@@ -19,7 +19,22 @@ import { ShelfCropLightbox } from "@/components/shelf/shelf-crop-lightbox";
 import { ShelfSkuUploadSafeguard } from "@/components/shelf/shelf-sku-upload-safeguard";
 import { Checkbox } from "@/components/ui/checkbox";
 import { MdReportDialog, fetchMarkdownReport } from "@/components/ui/md-report-dialog";
-import { ShelfAuditSummary, ShelfCropAuditDetail, ShelfConfigSnapshot, ShelfEventsTimeline } from "@/components/shelf/shelf-audit-panel";
+import {
+  ShelfAssistEngineUsedCard,
+  ShelfAuditSummary,
+  ShelfCropAuditDetail,
+  ShelfConfigSnapshot,
+  ShelfEventsTimeline,
+} from "@/components/shelf/shelf-audit-panel";
+import { ShelfOcrSkuAssistConfig } from "@/components/shelf/shelf-ocr-sku-assist-config";
+import {
+  DEFAULT_SHELF_OCR_SKU_ASSIST_DRAFT,
+  getOcrAssistDelta,
+  ocrAssistDraftFromConfig,
+  ocrAssistDraftToPatchPayload,
+  resolveAssistEngineUsedSnapshot,
+} from "@/lib/shelf-ocr-sku-assist";
+import type { JobEvent, ShelfOcrSkuAssistConfigDraft } from "@/types/ocr-api";
 
 type Props = { account: string };
 type Tab = "jobs" | "results" | "skus" | "assets" | "index" | "review";
@@ -953,6 +968,8 @@ function SimilarCandidatesPanel({
           const hnPenalty = getHardNegativePenaltyApplied(candidate);
           const hnAnchors = getHardNegativeAnchors(candidate);
           const hnApplied = hnPenalty > 0;
+          const ocrAssistDelta = getOcrAssistDelta(candidate);
+          const ocrAssistApplied = ocrAssistDelta !== 0;
 
           return (
             <div
@@ -977,6 +994,15 @@ function SimilarCandidatesPanel({
                   {hnApplied ? (
                     <Badge variant="secondary" className="whitespace-nowrap text-[10px]" title="Ranking ajustado con confusiones registradas">
                       −{hnPenalty.toFixed(3)} HN
+                    </Badge>
+                  ) : null}
+                  {ocrAssistApplied ? (
+                    <Badge
+                      variant="outline"
+                      className={`whitespace-nowrap border-cyan-300/30 text-[10px] ${ocrAssistDelta > 0 ? "text-cyan-200" : "text-red-200"}`}
+                      title="Delta aplicado por ocr_sku_assist en score_breakdown"
+                    >
+                      {ocrAssistDelta > 0 ? "+" : ""}{ocrAssistDelta.toFixed(3)} assist
                     </Badge>
                   ) : null}
                   <Badge variant={confidenceTone(candidateScore)} className="whitespace-nowrap text-[10px]">
@@ -1481,23 +1507,7 @@ export function AccountShelfPage({ account }: Props) {
   const [reliabilityCreatedTo, setReliabilityCreatedTo] = useState("");
   const [reliabilityCompareBaselineJobId, setReliabilityCompareBaselineJobId] = useState("");
   const [reliabilityCompareCandidateJobId, setReliabilityCompareCandidateJobId] = useState("");
-  const [ocrAssistDraft, setOcrAssistDraft] = useState({
-    enabled: false,
-    only_when_ambiguous: true,
-    apply_to_top_k: 3,
-    reorder_top_candidates: true,
-    prefetch_catalog_by_category: true,
-    prefetch_max_rows: 2000,
-    num_predict: 128,
-    num_ctx: 1024,
-    timeout_sec: 12,
-    min_text_chars: 4,
-    score_boost_barcode_exact: 0.20,
-    score_boost_marca: 0.05,
-    score_boost_tamano: 0.05,
-    score_boost_variante: 0.03,
-    score_penalty_on_conflict: 0.05,
-  });
+  const [ocrAssistDraft, setOcrAssistDraft] = useState<ShelfOcrSkuAssistConfigDraft>(DEFAULT_SHELF_OCR_SKU_ASSIST_DRAFT);
   const [ocrAssistDirty, setOcrAssistDirty] = useState(false);
   const [mdDialogRequest, setMdDialogRequest] = useState<MdDialogRequest>(null);
   const [reviewSearch, setReviewSearch] = useState("");
@@ -2368,25 +2378,7 @@ export function AccountShelfPage({ account }: Props) {
   useEffect(() => {
     if (!configQuery.data) return;
     const sr = (configQuery.data as Record<string, unknown>).shelf_recognition as Record<string, unknown> | undefined;
-    const oa = (sr?.ocr_sku_assist ?? {}) as Record<string, unknown>;
-    const sb = (oa.score_boost ?? {}) as Record<string, unknown>;
-    setOcrAssistDraft({
-      enabled: Boolean(oa.enabled),
-      only_when_ambiguous: oa.only_when_ambiguous !== false,
-      apply_to_top_k: Number(oa.apply_to_top_k) || 3,
-      reorder_top_candidates: oa.reorder_top_candidates !== false,
-      prefetch_catalog_by_category: oa.prefetch_catalog_by_category !== false,
-      prefetch_max_rows: Number(oa.prefetch_max_rows) || 2000,
-      num_predict: Number(oa.num_predict) || 128,
-      num_ctx: Number(oa.num_ctx) || 1024,
-      timeout_sec: Number(oa.timeout_sec) || 12,
-      min_text_chars: Number(oa.min_text_chars) || 4,
-      score_boost_barcode_exact: Number(sb.barcode_exact) || 0.20,
-      score_boost_marca: Number(sb.marca) || 0.05,
-      score_boost_tamano: Number(sb.tamano) || 0.05,
-      score_boost_variante: Number(sb.variante) || 0.03,
-      score_penalty_on_conflict: Number(oa.score_penalty_on_conflict) || 0.05,
-    });
+    setOcrAssistDraft(ocrAssistDraftFromConfig(sr?.ocr_sku_assist));
     setOcrAssistDirty(false);
   }, [configQuery.data]);
 
@@ -2397,25 +2389,7 @@ export function AccountShelfPage({ account }: Props) {
         version: "next",
         is_active: true,
         shelf_recognition: {
-          ocr_sku_assist: {
-            enabled: ocrAssistDraft.enabled,
-            only_when_ambiguous: ocrAssistDraft.only_when_ambiguous,
-            apply_to_top_k: ocrAssistDraft.apply_to_top_k,
-            reorder_top_candidates: ocrAssistDraft.reorder_top_candidates,
-            prefetch_catalog_by_category: ocrAssistDraft.prefetch_catalog_by_category,
-            prefetch_max_rows: ocrAssistDraft.prefetch_max_rows,
-            num_predict: ocrAssistDraft.num_predict,
-            num_ctx: ocrAssistDraft.num_ctx,
-            timeout_sec: ocrAssistDraft.timeout_sec,
-            min_text_chars: ocrAssistDraft.min_text_chars,
-            score_boost: {
-              barcode_exact: ocrAssistDraft.score_boost_barcode_exact,
-              marca: ocrAssistDraft.score_boost_marca,
-              tamano: ocrAssistDraft.score_boost_tamano,
-              variante: ocrAssistDraft.score_boost_variante,
-            },
-            score_penalty_on_conflict: ocrAssistDraft.score_penalty_on_conflict,
-          },
+          ocr_sku_assist: ocrAssistDraftToPatchPayload(ocrAssistDraft),
         },
       }),
     onSuccess: async () => {
@@ -2712,6 +2686,14 @@ export function AccountShelfPage({ account }: Props) {
     const root = resultsQuery.data?.result_json && typeof resultsQuery.data.result_json === "object" ? resultsQuery.data.result_json : {};
     return Array.isArray((root as Record<string, unknown>).results) ? ((root as Record<string, unknown>).results as Record<string, unknown>[]) : [];
   }, [resultsQuery.data]);
+
+  const assistEngineUsedSnapshot = useMemo(
+    () => resolveAssistEngineUsedSnapshot({
+      events: (eventsQuery.data ?? []) as JobEvent[],
+      resultJson: resultsQuery.data?.result_json,
+    }),
+    [eventsQuery.data, resultsQuery.data?.result_json],
+  );
 
   const selectedTrainingCropKeySet = useMemo(() => new Set(selectedTrainingCropKeys), [selectedTrainingCropKeys]);
 
@@ -6176,8 +6158,10 @@ export function AccountShelfPage({ account }: Props) {
               ) : null}
             </div>
 
+            <ShelfAssistEngineUsedCard snapshot={assistEngineUsedSnapshot} />
+
             <ShelfEventsTimeline
-              events={(eventsQuery.data ?? []) as { id: number | string; event_type: string; level: string; message: string; created_at?: string }[]}
+              events={(eventsQuery.data ?? []) as JobEvent[]}
               metrics={(metricsQuery.data?.metrics ?? []) as { id: number | string; step: string; duration_ms: number }[]}
             />
           </CardContent>
@@ -6372,14 +6356,17 @@ export function AccountShelfPage({ account }: Props) {
                     Evaluar crop
                   </Button>
                 </div>
+                <p className="mt-2 text-[11px] text-slate-400">
+                  El assist de SKU (<span className="font-mono">ocr_sku_assist</span>) se gobierna desde Índice → Config y corre automáticamente si está habilitado.
+                </p>
                 <div className="mt-3 grid gap-3 md:grid-cols-3">
                   <label className="flex items-center gap-2 rounded-md border border-white/10 bg-slate-950/40 px-3 py-2 text-sm text-slate-200">
                     <Switch checked={evaluateCropOrientationEnabled} onCheckedChange={setEvaluateCropOrientationEnabled} />
                     Orientación
                   </label>
-                  <label className="flex items-center gap-2 rounded-md border border-white/10 bg-slate-950/40 px-3 py-2 text-sm text-slate-200">
+                  <label className="flex items-center gap-2 rounded-md border border-white/10 bg-slate-950/40 px-3 py-2 text-sm text-slate-200" title="analysis.glm_ocr informativo. Distinto de ocr_sku_assist (config shelf).">
                     <Switch checked={evaluateCropGlmOcrEnabled} onCheckedChange={setEvaluateCropGlmOcrEnabled} />
-                    OCR GLM opcional
+                    GLM-OCR informativo
                   </label>
                   <label className="flex items-center gap-2 rounded-md border border-white/10 bg-slate-950/40 px-3 py-2 text-sm text-slate-200">
                     <Switch checked={evaluateCropVisualAnalystEnabled} onCheckedChange={setEvaluateCropVisualAnalystEnabled} />
@@ -6500,6 +6487,15 @@ export function AccountShelfPage({ account }: Props) {
                             </>
                           );
                         })()}
+                        <ShelfCropAuditDetail
+                          result={{
+                            crop_id: "evaluate-crop",
+                            ocr_sku_assist: (lastEvaluateCrop as Record<string, unknown>).ocr_sku_assist,
+                            top_candidates: lastEvaluateCrop.top_candidates ?? [],
+                          }}
+                          defaultOpen
+                        />
+
                         {(lastEvaluateCrop.top_candidates ?? []).length ? (
                           <div className="rounded-lg border border-white/10 bg-slate-950/40 p-3">
                             <p className="mb-2 text-sm font-semibold">Candidatos similares</p>
@@ -8450,120 +8446,16 @@ export function AccountShelfPage({ account }: Props) {
                 )}
               </div>
             </div>
-            <div className="rounded-lg border border-cyan-300/20 bg-cyan-500/5 p-4">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div>
-                  <p className="text-sm font-semibold text-slate-100">OCR SKU Assist</p>
-                  <p className="text-xs text-slate-300">Asistencia con GLM-OCR para reforzar el matching visual. Corre solo en recognition, no afecta promociones.</p>
-                </div>
-                <div className="flex items-center gap-3">
-                  <Badge variant={ocrAssistDraft.enabled ? "default" : "secondary"}>{ocrAssistDraft.enabled ? "Activo" : "Desactivado"}</Badge>
-                  {ocrAssistDirty ? <Badge variant="destructive">Sin guardar</Badge> : null}
-                </div>
-              </div>
-
-              <div className="mt-3 flex items-center justify-between rounded border border-white/10 bg-white/5 p-3">
-                <div className="space-y-1 pr-4">
-                  <Label htmlFor="ocr-assist-enabled" className="cursor-pointer text-sm font-medium">Habilitar OCR Assist</Label>
-                  <p className="text-[11px] text-slate-400">Maestro. Apagado = no se llama a GLM-OCR en ningún crop.</p>
-                </div>
-                <Switch id="ocr-assist-enabled" checked={ocrAssistDraft.enabled} onCheckedChange={(v) => { setOcrAssistDraft((d) => ({ ...d, enabled: v })); setOcrAssistDirty(true); }} />
-              </div>
-
-              {ocrAssistDraft.enabled ? (
-                <div className="mt-3 space-y-3">
-                  <div className="grid gap-3 md:grid-cols-2">
-                    <div className="flex items-center justify-between rounded border border-white/10 bg-white/5 p-3">
-                      <div className="space-y-1 pr-4">
-                        <Label htmlFor="ocr-assist-ambiguous" className="cursor-pointer text-sm">Solo cuando ambiguo</Label>
-                        <p className="text-[11px] text-slate-400">ON = salta OCR si top1 ya tiene high_confidence. Recomendado para producción.</p>
-                      </div>
-                      <Switch id="ocr-assist-ambiguous" checked={ocrAssistDraft.only_when_ambiguous} onCheckedChange={(v) => { setOcrAssistDraft((d) => ({ ...d, only_when_ambiguous: v })); setOcrAssistDirty(true); }} />
-                    </div>
-                    <div className="flex items-center justify-between rounded border border-white/10 bg-white/5 p-3">
-                      <div className="space-y-1 pr-4">
-                        <Label htmlFor="ocr-assist-reorder" className="cursor-pointer text-sm">Reordenar top candidates</Label>
-                        <p className="text-[11px] text-slate-400">Si tras el boost cambia el orden, reordena. OFF = solo audita sin afectar el resultado.</p>
-                      </div>
-                      <Switch id="ocr-assist-reorder" checked={ocrAssistDraft.reorder_top_candidates} onCheckedChange={(v) => { setOcrAssistDraft((d) => ({ ...d, reorder_top_candidates: v })); setOcrAssistDirty(true); }} />
-                    </div>
-                  </div>
-
-                  <div className="grid gap-3 md:grid-cols-2">
-                    <div className="flex items-center justify-between rounded border border-white/10 bg-white/5 p-3">
-                      <div className="space-y-1 pr-4">
-                        <Label htmlFor="ocr-assist-prefetch" className="cursor-pointer text-sm">Prefetch catalogo por categoria</Label>
-                        <p className="text-[11px] text-slate-400">Precarga shelf_skus filtrado por categoría fuzzy (exact/substring/tokens).</p>
-                      </div>
-                      <Switch id="ocr-assist-prefetch" checked={ocrAssistDraft.prefetch_catalog_by_category} onCheckedChange={(v) => { setOcrAssistDraft((d) => ({ ...d, prefetch_catalog_by_category: v })); setOcrAssistDirty(true); }} />
-                    </div>
-                    <div className="space-y-1 rounded border border-white/10 bg-white/5 p-3">
-                      <Label htmlFor="ocr-assist-topk">Top-K candidatos</Label>
-                      <Input id="ocr-assist-topk" type="number" min={1} max={10} value={ocrAssistDraft.apply_to_top_k} onChange={(e) => { setOcrAssistDraft((d) => ({ ...d, apply_to_top_k: Number(e.target.value) || 3 })); setOcrAssistDirty(true); }} className="bg-white/5 border-white/10" />
-                    </div>
-                  </div>
-
-                  <div className="rounded-lg border border-amber-300/20 bg-amber-500/5 p-3">
-                    <p className="mb-2 text-xs font-semibold text-slate-200">Score boost por señal OCR</p>
-                    <div className="grid gap-3 md:grid-cols-5">
-                      <div className="space-y-1">
-                        <Label className="text-[11px]">barcode_exact</Label>
-                        <Input type="number" step="0.01" min={0} max={1} value={ocrAssistDraft.score_boost_barcode_exact} onChange={(e) => { setOcrAssistDraft((d) => ({ ...d, score_boost_barcode_exact: Number(e.target.value) })); setOcrAssistDirty(true); }} className="bg-white/5 border-white/10" />
-                      </div>
-                      <div className="space-y-1">
-                        <Label className="text-[11px]">marca</Label>
-                        <Input type="number" step="0.01" min={0} max={1} value={ocrAssistDraft.score_boost_marca} onChange={(e) => { setOcrAssistDraft((d) => ({ ...d, score_boost_marca: Number(e.target.value) })); setOcrAssistDirty(true); }} className="bg-white/5 border-white/10" />
-                      </div>
-                      <div className="space-y-1">
-                        <Label className="text-[11px]">tamano</Label>
-                        <Input type="number" step="0.01" min={0} max={1} value={ocrAssistDraft.score_boost_tamano} onChange={(e) => { setOcrAssistDraft((d) => ({ ...d, score_boost_tamano: Number(e.target.value) })); setOcrAssistDirty(true); }} className="bg-white/5 border-white/10" />
-                      </div>
-                      <div className="space-y-1">
-                        <Label className="text-[11px]">variante</Label>
-                        <Input type="number" step="0.01" min={0} max={1} value={ocrAssistDraft.score_boost_variante} onChange={(e) => { setOcrAssistDraft((d) => ({ ...d, score_boost_variante: Number(e.target.value) })); setOcrAssistDirty(true); }} className="bg-white/5 border-white/10" />
-                      </div>
-                      <div className="space-y-1">
-                        <Label className="text-[11px]">penalty conflicto</Label>
-                        <Input type="number" step="0.01" min={0} max={1} value={ocrAssistDraft.score_penalty_on_conflict} onChange={(e) => { setOcrAssistDraft((d) => ({ ...d, score_penalty_on_conflict: Number(e.target.value) })); setOcrAssistDirty(true); }} className="bg-white/5 border-white/10" />
-                      </div>
-                    </div>
-                    <p className="mt-2 text-[11px] text-slate-400">Poner 0 en cualquier campo desactiva esa señal. Penalty aplica cuando OCR detecta tamaño distinto al del SKU candidato.</p>
-                  </div>
-
-                  <details className="rounded-lg border border-white/10 bg-black/20 p-3">
-                    <summary className="cursor-pointer text-sm font-medium text-slate-200">Parametros de velocidad</summary>
-                    <div className="mt-3 grid gap-3 md:grid-cols-4">
-                      <div className="space-y-1">
-                        <Label className="text-[11px]">num_predict</Label>
-                        <Input type="number" min={32} max={512} value={ocrAssistDraft.num_predict} onChange={(e) => { setOcrAssistDraft((d) => ({ ...d, num_predict: Number(e.target.value) || 128 })); setOcrAssistDirty(true); }} className="bg-white/5 border-white/10" />
-                      </div>
-                      <div className="space-y-1">
-                        <Label className="text-[11px]">num_ctx</Label>
-                        <Input type="number" min={256} max={4096} value={ocrAssistDraft.num_ctx} onChange={(e) => { setOcrAssistDraft((d) => ({ ...d, num_ctx: Number(e.target.value) || 1024 })); setOcrAssistDirty(true); }} className="bg-white/5 border-white/10" />
-                      </div>
-                      <div className="space-y-1">
-                        <Label className="text-[11px]">timeout_sec</Label>
-                        <Input type="number" min={3} max={60} value={ocrAssistDraft.timeout_sec} onChange={(e) => { setOcrAssistDraft((d) => ({ ...d, timeout_sec: Number(e.target.value) || 12 })); setOcrAssistDirty(true); }} className="bg-white/5 border-white/10" />
-                      </div>
-                      <div className="space-y-1">
-                        <Label className="text-[11px]">min_text_chars</Label>
-                        <Input type="number" min={1} max={20} value={ocrAssistDraft.min_text_chars} onChange={(e) => { setOcrAssistDraft((d) => ({ ...d, min_text_chars: Number(e.target.value) || 4 })); setOcrAssistDirty(true); }} className="bg-white/5 border-white/10" />
-                      </div>
-                    </div>
-                    <div className="mt-2 space-y-1">
-                      <Label className="text-[11px]">prefetch_max_rows</Label>
-                      <Input type="number" min={50} max={20000} value={ocrAssistDraft.prefetch_max_rows} onChange={(e) => { setOcrAssistDraft((d) => ({ ...d, prefetch_max_rows: Number(e.target.value) || 2000 })); setOcrAssistDirty(true); }} className="bg-white/5 border-white/10 max-w-xs" />
-                    </div>
-                  </details>
-
-                  <div className="flex justify-end">
-                    <Button onClick={() => saveOcrAssistMutation.mutate()} disabled={!ocrAssistDirty || saveOcrAssistMutation.isPending}>
-                      {saveOcrAssistMutation.isPending ? "Guardando..." : "Guardar OCR Assist"}
-                    </Button>
-                  </div>
-                </div>
-              ) : null}
-            </div>
+            <ShelfOcrSkuAssistConfig
+              draft={ocrAssistDraft}
+              dirty={ocrAssistDirty}
+              saving={saveOcrAssistMutation.isPending}
+              onChange={(updater) => {
+                setOcrAssistDraft(updater);
+                setOcrAssistDirty(true);
+              }}
+              onSave={() => saveOcrAssistMutation.mutate()}
+            />
             </div>
             ) : null}
 

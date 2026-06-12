@@ -2725,6 +2725,7 @@ export type ShelfEvaluateCropResponse = {
   embedding_diagnostics?: ShelfDiagnostics | null;
   duration_ms?: number | null;
   future_extensions?: Record<string, unknown> | null;
+  ocr_sku_assist?: ShelfOcrSkuAssistCrop | null;
   [key: string]: unknown;
 };
 
@@ -2783,4 +2784,121 @@ export type ShelfReviewQueueItem = {
   created_at?: string;
   updated_at?: string;
   [key: string]: unknown;
+};
+
+export type ShelfAssistEngine = "ocr" | "vision_llm" | "both";
+export type ShelfShadowEngine = "ocr" | "vision_llm" | null;
+export type ShelfCategoriaMatchStrategy = "exact" | "substring" | "tokens";
+
+export type ShelfOcrSkuAssistVisionConfig = {
+  model: string | null;
+  prompt_file: string;
+  timeout_sec: number;
+  num_ctx: number;
+  num_predict: number;
+  temperature: number;
+  keep_alive: string;
+  max_retries: number;
+  score_boost_marca: number;
+  score_boost_tamano: number;
+  score_boost_variante: number;
+  score_boost_color: number;
+  score_boost_tipo_envase: number;
+  score_penalty_on_conflict: number;
+  max_total_boost: number;
+};
+
+export type ShelfOcrSkuAssistConfigDraft = {
+  enabled: boolean;
+  only_when_ambiguous: boolean;
+  engine: ShelfAssistEngine;
+  shadow_engine: ShelfShadowEngine;
+  apply_to_top_k: number;
+  reorder_top_candidates: boolean;
+  prefetch_catalog_by_category: boolean;
+  categoria_match_strategies: ShelfCategoriaMatchStrategy[];
+  prefetch_max_rows: number;
+  num_predict: number;
+  num_ctx: number;
+  timeout_sec: number;
+  min_text_chars: number;
+  score_boost_barcode_exact: number;
+  score_boost_marca: number;
+  score_boost_tamano: number;
+  score_boost_variante: number;
+  score_penalty_on_conflict: number;
+  vision: ShelfOcrSkuAssistVisionConfig;
+};
+
+export type ShelfOcrSkuAssistSummary = {
+  total_ocr_assist_ran: number;
+  total_ocr_assist_reordered: number;
+  ocr_assist_gate_reasons: Record<string, number>;
+  assist_engine_breakdown: Record<string, number>;
+  total_shadow_assist_ran: number;
+  total_shadow_would_reorder: number;
+  shadow_engine_breakdown: Record<string, number>;
+};
+
+export type ShelfOcrSkuAssistCandidateSignal = {
+  rank_before: number;
+  sku_id: string;
+  delta: number;
+  signals: string[];
+  components?: Record<string, number>;
+};
+
+export type ShelfOcrSkuAssistMotor = {
+  status?: string;
+  model?: string;
+  prompt_file?: string;
+  duration_ms?: number;
+  text_preview?: string;
+  attributes_preview?: Record<string, unknown>;
+  raw_preview?: string;
+};
+
+export type ShelfOcrSkuAssistShadow = {
+  engine?: string;
+  ran?: boolean;
+  gate_reason?: string;
+  would_reorder?: boolean;
+  order_before?: string[];
+  order_hypothetical?: string[];
+  per_candidate?: ShelfOcrSkuAssistCandidateSignal[];
+  vision?: ShelfOcrSkuAssistMotor;
+  ocr?: ShelfOcrSkuAssistMotor;
+};
+
+export type ShelfOcrSkuAssistCrop = {
+  enabled?: boolean;
+  engine?: ShelfAssistEngine | string;
+  shadow_engine?: string | null;
+  only_when_ambiguous?: boolean;
+  ran?: boolean;
+  gate_reason?: string;
+  reordered?: boolean;
+  catalog_prefetch?: Record<string, unknown>;
+  ocr?: ShelfOcrSkuAssistMotor;
+  vision?: ShelfOcrSkuAssistMotor;
+  per_candidate?: ShelfOcrSkuAssistCandidateSignal[];
+  order_before?: string[];
+  order_after?: string[];
+  shadow?: ShelfOcrSkuAssistShadow;
+  ocr_sku_assist_short?: string;
+};
+
+export type ShelfAssistEngineConfigured = {
+  enabled?: boolean;
+  engine?: ShelfAssistEngine | string;
+  shadow_engine?: string | null;
+  only_when_ambiguous?: boolean;
+  apply_to_top_k?: number;
+};
+
+export type ShelfAssistEngineUsedEvent = {
+  processing_mode?: string;
+  configured?: ShelfAssistEngineConfigured;
+  observed?: ShelfOcrSkuAssistSummary;
+  source?: "job_event" | "result_summary";
 };
