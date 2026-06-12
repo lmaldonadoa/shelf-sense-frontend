@@ -15,6 +15,7 @@ import {
   TrainingPanelCard,
   TrainingSectionHero,
 } from "@/components/training/training-ui";
+import { LoadingPanel } from "@/components/ui/async-content";
 
 type Props = { account: string };
 
@@ -185,6 +186,10 @@ export function PromotionVariantsEditor({ account }: Props) {
         </Button>
       </div>
 
+      {variantsQuery.isLoading ? (
+        <LoadingPanel message="Cargando variantes de promoción…" variant="cards" />
+      ) : null}
+
       <TrainingFormCard title="Nueva variante" tone="violet">
           <div className="space-y-2">
             <Label htmlFor="canonical">Canonical (OBLIGATORIO)</Label>
@@ -278,7 +283,7 @@ export function PromotionVariantsEditor({ account }: Props) {
             {/* Compound Terms */}
             <div className="space-y-2">
               <Label className="text-sm">Compound Terms (Frases de 2+ Palabras)</Label>
-              <p className="text-xs text-white/60">Para "ORQUIDEAS & ACAI": usa [RQUID, ACA]</p>
+              <p className="text-xs text-white/60">Para &ldquo;ORQUIDEAS &amp; ACAI&rdquo;: usa [RQUID, ACA]</p>
               <div className="flex gap-2">
                 {currentInputType === "compound" && (
                   <>

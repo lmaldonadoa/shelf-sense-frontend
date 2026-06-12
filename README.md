@@ -28,6 +28,32 @@ Escenarios:
 npm run dev
 ```
 
+## Exponer con ngrok
+
+Si ya tienes una sesion local de `ngrok` activa, puedes reutilizarla desde PowerShell:
+
+```powershell
+.\scripts\expose-ngrok.ps1 -Target frontend
+```
+
+Para exponer el backend OCR:
+
+```powershell
+.\scripts\expose-ngrok.ps1 -Target backend
+```
+
+Si `ngrok` ya esta ocupado con otro tunnel y quieres reemplazarlo en la sesion actual:
+
+```powershell
+.\scripts\expose-ngrok.ps1 -Target frontend -RestartExisting
+```
+
+Si aun no has abierto ngrok, inicia una sesion con:
+
+```powershell
+ngrok http 3000
+```
+
 ## Rutas principales
 
 - `/jobs/new`: upload -> file_ids -> create job

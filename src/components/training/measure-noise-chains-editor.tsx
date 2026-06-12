@@ -285,8 +285,8 @@ export function MeasureNoiseChainsEditor({ account, onGoToChains }: Props) {
       <TrainingSectionHero
         tone="violet"
         icon={<Ruler className="h-4 w-4" />}
-        title="Correccion de medidas"
-        description="Activa esta regla del pipeline en las cadenas donde el OCR suele romper tamanos o multipacks."
+        title="Correccion de medidas por cadena"
+        description="Define en que cadenas se activa la regla de correccion de medidas y ruido OCR en el pipeline promocional."
         badges={
           <>
             <Badge variant="outline" className="text-[10px]">

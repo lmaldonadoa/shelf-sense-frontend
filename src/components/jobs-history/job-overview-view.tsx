@@ -5,6 +5,8 @@ import Link from "next/link";
 import {
   AlertTriangle,
   BarChart3,
+  Barcode,
+  CalendarClock,
   ChevronRight,
   Download,
   FileJson2,
@@ -14,7 +16,9 @@ import {
   Package,
   RefreshCcw,
   ScrollText,
+  Sparkles,
   Store,
+  Tag,
 } from "lucide-react";
 import { toast } from "sonner";
 import { HttpError, ocrApi } from "@/lib/ocrApi";
@@ -27,6 +31,10 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { JobDetailViewKey } from "@/components/jobs-history/job-view-tabs";
+import { PromotionCardinalityCard } from "@/components/jobs/promotion-cardinality-card";
+import type { PromotionCardinality } from "@/types/ocr-api";
+import { LoadingPanel } from "@/components/ui/async-content";
+import { formatWallClockDuration } from "@/lib/format-duration";
 import { cn } from "@/lib/utils";
 
 type JobSummaryData = {
@@ -68,6 +76,8 @@ export type JobOverviewViewProps = {
   chainDiagnostics: ChainDiagnosticsSlice;
   normalizedUserResponse: Record<string, unknown> | null | undefined;
   dedupeSummary: Record<string, unknown> | null | undefined;
+  promotionCardinality: PromotionCardinality | null | undefined;
+  promotionReviewRequired: boolean;
   resultsLoading: boolean;
   resultsFetching: boolean;
   resultsPendingMessage: string | null;
@@ -90,18 +100,7 @@ export type JobOverviewViewProps = {
 };
 
 function formatJobDuration(started?: string | null, finished?: string | null): string {
-  if (!started || !finished) return "En curso o sin cerrar";
-  const startMs = new Date(started).getTime();
-  const endMs = new Date(finished).getTime();
-  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs < startMs) return "-";
-  const totalSec = Math.round((endMs - startMs) / 1000);
-  const minutes = Math.floor(totalSec / 60);
-  const seconds = totalSec % 60;
-  if (minutes < 1) return `${seconds}s`;
-  if (minutes < 60) return `${minutes}m ${seconds}s`;
-  const hours = Math.floor(minutes / 60);
-  const remMin = minutes % 60;
-  return `${hours}h ${remMin}m`;
+  return formatWallClockDuration(started, finished);
 }
 
 function imageLabel(image: JobImage): string {
@@ -110,11 +109,13 @@ function imageLabel(image: JobImage): string {
 
 function SummaryTile({
   label,
+  hint,
   children,
   className,
   onClick,
 }: {
   label: string;
+  hint?: string;
   children: ReactNode;
   className?: string;
   onClick?: () => void;
@@ -125,13 +126,58 @@ function SummaryTile({
       type={onClick ? "button" : undefined}
       onClick={onClick}
       className={cn(
-        "rounded-lg border border-white/10 bg-black/20 p-3 text-left",
+        "rounded-xl border border-white/10 bg-black/20 p-3 text-left",
         onClick && "transition-colors hover:border-cyan-400/30 hover:bg-cyan-500/5",
         className,
       )}
     >
-      <p className="text-xs text-muted-foreground">{label}</p>
-      <div className="mt-1">{children}</div>
+      <p className="text-[11px] font-medium uppercase tracking-wide text-slate-500">{label}</p>
+      <div className="mt-1.5">{children}</div>
+      {hint ? <p className="mt-1.5 text-[11px] leading-relaxed text-slate-500">{hint}</p> : null}
+    </Comp>
+  );
+}
+
+function OutcomeKpi({
+  icon,
+  label,
+  value,
+  hint,
+  onClick,
+  accent,
+}: {
+  icon: ReactNode;
+  label: string;
+  value: ReactNode;
+  hint: string;
+  onClick?: () => void;
+  accent?: "cyan" | "violet" | "emerald" | "amber";
+}) {
+  const accents = {
+    cyan: "border-cyan-400/20 from-cyan-500/10",
+    violet: "border-violet-400/20 from-violet-500/10",
+    emerald: "border-emerald-400/20 from-emerald-500/10",
+    amber: "border-amber-400/20 from-amber-500/10",
+  };
+  const Comp = onClick ? "button" : "div";
+  return (
+    <Comp
+      type={onClick ? "button" : undefined}
+      onClick={onClick}
+      className={cn(
+        "rounded-xl border bg-gradient-to-br to-transparent p-4 text-left",
+        accents[accent ?? "cyan"],
+        onClick && "transition-transform hover:scale-[1.01]",
+      )}
+    >
+      <div className="flex items-start justify-between gap-2">
+        <div>
+          <p className="text-[11px] font-medium uppercase tracking-wide text-slate-500">{label}</p>
+          <p className="mt-1 font-heading text-2xl font-semibold text-white">{value}</p>
+        </div>
+        <div className="rounded-lg border border-white/10 bg-black/25 p-2 text-slate-300">{icon}</div>
+      </div>
+      <p className="mt-2 text-xs text-slate-400">{hint}</p>
     </Comp>
   );
 }
@@ -143,6 +189,8 @@ function JobOverviewStatusBar({
   totalProducts,
   totalPromotions,
   needsReviewCount,
+  promotionReviewRequired,
+  detectedPromotionsLabel,
   chainDiagnostics,
   onNavigate,
 }: {
@@ -152,6 +200,8 @@ function JobOverviewStatusBar({
   totalProducts: number;
   totalPromotions: number;
   needsReviewCount: number;
+  promotionReviewRequired: boolean;
+  detectedPromotionsLabel: string;
   chainDiagnostics: ChainDiagnosticsSlice;
   onNavigate: (view: JobDetailViewKey) => void;
 }) {
@@ -171,6 +221,11 @@ function JobOverviewStatusBar({
             <Badge variant={getStatusVariant(status)} className="shrink-0 px-3 py-1 text-sm uppercase">
               {status}
             </Badge>
+            {promotionReviewRequired ? (
+              <Badge variant="secondary" className="shrink-0 border-amber-400/35 bg-amber-500/15 text-amber-100">
+                Requiere revisión
+              </Badge>
+            ) : null}
             <div className="min-w-0">
               <p className="text-sm font-semibold text-white">Estado operativo del job</p>
               <p className="mt-0.5 text-xs text-slate-400">
@@ -197,14 +252,15 @@ function JobOverviewStatusBar({
           </div>
 
           <div className="grid grid-cols-3 gap-2 sm:flex sm:flex-wrap">
-            <SummaryTile label="Productos" onClick={() => onNavigate("products")}>
+            <SummaryTile label="Productos" hint="Filas finales" onClick={() => onNavigate("products")}>
               <p className="text-lg font-semibold text-white">{totalProducts}</p>
             </SummaryTile>
-            <SummaryTile label="Promos" onClick={() => onNavigate("products")}>
-              <p className="text-lg font-semibold text-white">{totalPromotions}</p>
+            <SummaryTile label="Promociones" hint="Etiquetas detectadas" onClick={() => onNavigate("products")}>
+              <p className="text-lg font-semibold text-white">{detectedPromotionsLabel}</p>
             </SummaryTile>
             <SummaryTile
-              label="Review"
+              label="Revisiones"
+              hint="Imágenes en needs_review"
               onClick={needsReviewCount > 0 ? () => onNavigate("artifacts") : undefined}
               className={needsReviewCount > 0 ? "border-amber-300/30 bg-amber-500/10" : undefined}
             >
@@ -265,11 +321,17 @@ function JobOverviewImagesMiniList({
 }) {
   if (!images.length) return null;
   const preview = images.slice(0, 6);
+  const reviewCount = images.filter((img) => img.processing_status === "needs_review" || img.status === "needs_review").length;
 
   return (
     <Card className="border-white/10 bg-white/5 backdrop-blur">
       <CardHeader className="flex flex-row items-center justify-between gap-2 pb-2">
-        <CardTitle className="text-base">Imágenes del job</CardTitle>
+        <div>
+          <CardTitle className="text-base">Imágenes del job</CardTitle>
+          <p className="mt-0.5 text-xs text-slate-500">
+            {images.length} en total{reviewCount > 0 ? ` · ${reviewCount} requieren revisión` : ""}
+          </p>
+        </div>
         {images.length > preview.length ? (
           <Button size="sm" variant="ghost" className="h-8 text-xs" onClick={() => onNavigate("artifacts")}>
             Ver todas ({images.length})
@@ -279,6 +341,7 @@ function JobOverviewImagesMiniList({
       <CardContent className="space-y-2">
         {preview.map((image) => {
           const review = image.processing_status === "needs_review" || image.status === "needs_review";
+          const statusLabel = image.processing_status ?? image.status;
           return (
             <button
               key={`overview-image-${image.id}`}
@@ -287,17 +350,18 @@ function JobOverviewImagesMiniList({
                 onSelectImage(image);
                 onNavigate("artifacts");
               }}
-              className="flex w-full items-center justify-between gap-3 rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-left transition-colors hover:border-cyan-400/30 hover:bg-cyan-500/5"
+              className="flex w-full items-center justify-between gap-3 rounded-xl border border-white/10 bg-black/20 px-3 py-2.5 text-left transition-colors hover:border-cyan-400/30 hover:bg-cyan-500/5"
             >
               <div className="min-w-0">
                 <p className="truncate text-sm font-medium text-white">{imageLabel(image)}</p>
-                <p className="text-[11px] text-slate-400">
-                  {image.status}
-                  {image.processing_status ? ` · ${image.processing_status}` : ""}
+                <p className="mt-0.5 text-[11px] text-slate-500">
+                  {image.image_process_code ? `Código ${image.image_process_code}` : `ID ${image.id}`}
                 </p>
               </div>
               <div className="flex shrink-0 items-center gap-1.5">
-                {review ? <Badge variant="destructive" className="text-[10px]">review</Badge> : null}
+                <Badge variant={review ? "destructive" : "outline"} className="text-[10px] capitalize">
+                  {review ? "Revisión" : statusLabel}
+                </Badge>
                 <ChevronRight className="h-4 w-4 text-slate-500" />
               </div>
             </button>
@@ -325,6 +389,8 @@ export function JobOverviewView({
   chainDiagnostics,
   normalizedUserResponse,
   dedupeSummary,
+  promotionCardinality,
+  promotionReviewRequired,
   resultsLoading,
   resultsFetching,
   resultsPendingMessage,
@@ -345,6 +411,11 @@ export function JobOverviewView({
   lookupResult,
   reprocessJobId,
 }: JobOverviewViewProps) {
+  const detectedPromotionsLabel =
+    typeof promotionCardinality?.detected_promotions === "number"
+      ? String(promotionCardinality.detected_promotions)
+      : String(totalPromotions);
+
   return (
     <div className="space-y-6">
       {!jobLoading && jobData ? (
@@ -355,6 +426,8 @@ export function JobOverviewView({
           totalProducts={totalProducts}
           totalPromotions={totalPromotions}
           needsReviewCount={needsReviewCount}
+          promotionReviewRequired={promotionReviewRequired}
+          detectedPromotionsLabel={detectedPromotionsLabel}
           chainDiagnostics={chainDiagnostics}
           onNavigate={onNavigate}
         />
@@ -363,7 +436,10 @@ export function JobOverviewView({
       <div className="grid gap-6 xl:grid-cols-2">
         <div className="space-y-6">
           <Card className="border-white/10 bg-white/5 backdrop-blur">
-            <CardHeader><CardTitle>Resumen del job</CardTitle></CardHeader>
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base">Resumen del job</CardTitle>
+              <p className="text-sm text-slate-400">Identidad, tiempos de ejecución y avance por imagen.</p>
+            </CardHeader>
             <CardContent className="space-y-4">
               {jobLoading ? (
                 <div className="space-y-2">
@@ -374,29 +450,85 @@ export function JobOverviewView({
                 <p className="text-sm text-rose-300">No se pudo cargar detalle de job.</p>
               ) : (
                 <>
-                  <details open className="rounded-lg border border-white/10 bg-black/15 px-3 py-2">
-                    <summary className="cursor-pointer text-sm font-semibold text-slate-200">Identidad</summary>
-                    <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                      <SummaryTile label="job_id"><p className="font-mono text-xs break-all">{jobData?.job_id}</p></SummaryTile>
-                      <SummaryTile label="account_name"><p className="text-sm">{jobData?.account_name ?? resolvedAccount}</p></SummaryTile>
-                      <SummaryTile label="config_name"><p className="text-sm">{jobData?.config_name ?? "-"}</p></SummaryTile>
-                      <SummaryTile label="status"><Badge variant={getStatusVariant(jobData?.status ?? "unknown")}>{jobData?.status ?? "unknown"}</Badge></SummaryTile>
-                    </div>
-                  </details>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <SummaryTile label="Job" hint="Identificador único de esta corrida">
+                      <p className="font-mono text-xs break-all text-slate-100">{jobData?.job_id}</p>
+                    </SummaryTile>
+                    <SummaryTile label="Cuenta">
+                      <p className="text-sm font-medium text-white">{jobData?.account_name ?? resolvedAccount}</p>
+                    </SummaryTile>
+                    <SummaryTile label="Configuración">
+                      <p className="text-sm text-slate-200">{jobData?.config_name ?? "—"}</p>
+                    </SummaryTile>
+                    <SummaryTile label="Estado">
+                      <Badge variant={getStatusVariant(jobData?.status ?? "unknown")} className="uppercase">
+                        {jobData?.status ?? "unknown"}
+                      </Badge>
+                    </SummaryTile>
+                  </div>
 
-                  <details open className="rounded-lg border border-white/10 bg-black/15 px-3 py-2">
-                    <summary className="cursor-pointer text-sm font-semibold text-slate-200">Ejecución</summary>
-                    <div className="mt-3 grid gap-3 sm:grid-cols-2">
-                      <SummaryTile label="created_at"><p className="text-xs">{formatDate(jobData?.created_at)}</p></SummaryTile>
-                      <SummaryTile label="started_at"><p className="text-xs">{formatDate(jobData?.started_at)}</p></SummaryTile>
-                      <SummaryTile label="updated_at"><p className="text-xs">{formatDate(jobData?.updated_at)}</p></SummaryTile>
-                      <SummaryTile label="finished_at"><p className="text-xs">{formatDate(jobData?.finished_at)}</p></SummaryTile>
-                      <SummaryTile label="total_images"><p className="text-lg font-semibold">{jobData?.total_images ?? 0}</p></SummaryTile>
-                      <SummaryTile label="processed_images"><p className="text-lg font-semibold text-emerald-200">{jobData?.processed_images ?? 0}</p></SummaryTile>
-                      <SummaryTile label="failed_images"><p className="text-lg font-semibold text-rose-200">{jobData?.failed_images ?? 0}</p></SummaryTile>
-                      <SummaryTile label="error"><p className="text-xs text-rose-300 break-words">{jobData?.error_message ?? "-"}</p></SummaryTile>
+                  <div className="rounded-xl border border-white/10 bg-black/20 p-4">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div className="flex items-center gap-2 text-slate-300">
+                        <CalendarClock className="h-4 w-4 text-cyan-300" />
+                        <span className="text-sm font-medium">Línea de tiempo</span>
+                      </div>
+                      <div className="text-right">
+                        <p className="text-[11px] uppercase tracking-wide text-slate-500">Duración total</p>
+                        <p className="font-heading text-xl font-semibold text-white">
+                          {formatJobDuration(jobData?.started_at, jobData?.finished_at)}
+                        </p>
+                      </div>
                     </div>
-                  </details>
+                    <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                      <SummaryTile label="Creado"><p className="text-xs text-slate-200">{formatDate(jobData?.created_at)}</p></SummaryTile>
+                      <SummaryTile label="Inicio"><p className="text-xs text-slate-200">{formatDate(jobData?.started_at)}</p></SummaryTile>
+                      <SummaryTile label="Última actualización"><p className="text-xs text-slate-200">{formatDate(jobData?.updated_at)}</p></SummaryTile>
+                      <SummaryTile label="Finalizado"><p className="text-xs text-slate-200">{formatDate(jobData?.finished_at)}</p></SummaryTile>
+                    </div>
+                  </div>
+
+                  <div className="rounded-xl border border-emerald-400/15 bg-emerald-500/5 p-4">
+                    <p className="text-sm font-medium text-emerald-100">Procesamiento de imágenes</p>
+                    <div className="mt-3 grid grid-cols-3 gap-3">
+                      <SummaryTile label="Total">
+                        <p className="text-2xl font-semibold text-white">{jobData?.total_images ?? 0}</p>
+                      </SummaryTile>
+                      <SummaryTile label="Procesadas">
+                        <p className="text-2xl font-semibold text-emerald-200">{jobData?.processed_images ?? 0}</p>
+                      </SummaryTile>
+                      <SummaryTile label="Fallidas">
+                        <p className={cn("text-2xl font-semibold", (jobData?.failed_images ?? 0) > 0 ? "text-rose-300" : "text-slate-400")}>
+                          {jobData?.failed_images ?? 0}
+                        </p>
+                      </SummaryTile>
+                    </div>
+                    {(jobData?.total_images ?? 0) > 0 ? (
+                      <div className="mt-3">
+                        <div className="mb-1 flex justify-between text-[11px] text-slate-500">
+                          <span>Avance</span>
+                          <span>
+                            {jobData?.processed_images ?? 0}/{jobData?.total_images ?? 0} imágenes
+                          </span>
+                        </div>
+                        <div className="h-2 overflow-hidden rounded-full bg-black/30">
+                          <div
+                            className="h-full rounded-full bg-gradient-to-r from-emerald-500 to-cyan-400"
+                            style={{
+                              width: `${Math.min(100, Math.round(((jobData?.processed_images ?? 0) / (jobData?.total_images ?? 1)) * 100))}%`,
+                            }}
+                          />
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
+
+                  {jobData?.error_message ? (
+                    <div className="rounded-lg border border-rose-400/25 bg-rose-500/10 px-3 py-2.5 text-sm text-rose-100">
+                      <p className="text-[11px] font-medium uppercase tracking-wide text-rose-200/80">Error reportado</p>
+                      <p className="mt-1 break-words">{jobData.error_message}</p>
+                    </div>
+                  ) : null}
 
                   {(jobData?.status ?? "").toLowerCase() === "queued" ? (
                     <div className="rounded-lg border border-amber-300/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">
@@ -451,7 +583,12 @@ export function JobOverviewView({
 
           <Card className="border-white/10 bg-white/5 backdrop-blur">
             <CardHeader className="flex flex-col gap-3">
-              <CardTitle>Resultados y artefactos</CardTitle>
+              <div>
+                <CardTitle className="text-base">Salida del procesamiento</CardTitle>
+                <p className="mt-1 text-sm text-slate-400">
+                  Conteos finales, consistencia promocional y enlaces a reportes exportables.
+                </p>
+              </div>
               <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
                 <Button
                   size="sm"
@@ -512,7 +649,13 @@ export function JobOverviewView({
               </div>
             </CardHeader>
             <CardContent className="space-y-4">
-              {resultsLoading ? <Skeleton className="h-24 w-full" /> : null}
+              {resultsLoading || (resultsFetching && !resultsPendingMessage && !resultsErrorDetail) ? (
+                <LoadingPanel
+                  message="Cargando resultados del job…"
+                  subtitle="Productos, promociones y artefactos exportables."
+                  variant="cards"
+                />
+              ) : null}
               {resultsPendingMessage ? (
                 <div className="flex flex-col gap-2 rounded-lg border border-amber-300/30 bg-amber-500/10 px-3 py-3 sm:flex-row sm:items-center sm:justify-between">
                   <p className="text-sm text-amber-100">{resultsPendingMessage}</p>
@@ -525,45 +668,86 @@ export function JobOverviewView({
                 <p className="text-sm text-rose-300">No se pudieron cargar resultados: {resultsErrorDetail}</p>
               ) : null}
 
+              {resultsLoading || (resultsFetching && !resultsPendingMessage) ? null : (
+              <>
               <div className="grid gap-3 sm:grid-cols-3">
-                <SummaryTile label="total_products" onClick={() => onNavigate("products")}>
-                  <p className="text-lg font-semibold">{totalProducts}</p>
-                </SummaryTile>
-                <SummaryTile label="total_promotions" onClick={() => onNavigate("products")}>
-                  <p className="text-lg font-semibold">{totalPromotions}</p>
-                </SummaryTile>
-                <SummaryTile label="total_barcodes" onClick={() => onNavigate("products")}>
-                  <p className="text-lg font-semibold">{totalBarcodes}</p>
-                </SummaryTile>
+                <OutcomeKpi
+                  icon={<Package className="h-4 w-4" />}
+                  label="Productos finales"
+                  value={totalProducts}
+                  hint="Filas activas en el resultado consolidado del job."
+                  onClick={() => onNavigate("products")}
+                  accent="cyan"
+                />
+                <OutcomeKpi
+                  icon={<Tag className="h-4 w-4" />}
+                  label="Promociones"
+                  value={detectedPromotionsLabel}
+                  hint={
+                    typeof promotionCardinality?.detected_promotions === "number"
+                      ? "Etiquetas promocionales detectadas por el backend."
+                      : "Conteo reportado en el resumen del job."
+                  }
+                  onClick={() => onNavigate("products")}
+                  accent="violet"
+                />
+                <OutcomeKpi
+                  icon={<Barcode className="h-4 w-4" />}
+                  label="Códigos de barras"
+                  value={totalBarcodes}
+                  hint="Lecturas EAN/UPC reconocidas en el resultado."
+                  onClick={() => onNavigate("products")}
+                  accent="emerald"
+                />
               </div>
 
               {normalizedUserResponse ? (
-                <div className="grid gap-3 sm:grid-cols-3">
-                  <SummaryTile label="id_pdv"><p className="text-sm font-semibold">{String(normalizedUserResponse.id_pdv ?? "-")}</p></SummaryTile>
-                  <SummaryTile label="subcategoria"><p className="text-sm font-semibold">{String(normalizedUserResponse.subcategoria ?? "-")}</p></SummaryTile>
-                  <SummaryTile label="usuario_relevo"><p className="text-sm font-semibold">{String(normalizedUserResponse.usuario_relevo ?? "-")}</p></SummaryTile>
+                <div className="rounded-xl border border-white/10 bg-black/20 p-3">
+                  <p className="mb-3 text-[11px] font-medium uppercase tracking-wide text-slate-500">Contexto del relevo</p>
+                  <div className="grid gap-3 sm:grid-cols-3">
+                    <SummaryTile label="PDV"><p className="text-sm font-semibold text-white">{String(normalizedUserResponse.id_pdv ?? "—")}</p></SummaryTile>
+                    <SummaryTile label="Subcategoría"><p className="text-sm font-semibold text-white">{String(normalizedUserResponse.subcategoria ?? "—")}</p></SummaryTile>
+                    <SummaryTile label="Usuario relevo"><p className="text-sm font-semibold text-white">{String(normalizedUserResponse.usuario_relevo ?? "—")}</p></SummaryTile>
+                  </div>
                 </div>
               ) : null}
 
+              <PromotionCardinalityCard
+                cardinality={promotionCardinality}
+                showReviewBadge={promotionReviewRequired}
+                onReprocessSuggested={onReprocessByCode}
+                reprocessPending={reprocessPending}
+              />
+
               {dedupeSummary ? (
-                <div className="space-y-2 rounded-lg border border-white/10 bg-black/20 p-3">
-                  <p className="text-xs font-semibold tracking-wide text-slate-300">Consolidacion / Deduplicacion</p>
+                <div className="space-y-3 rounded-xl border border-white/10 bg-black/20 p-4">
+                  <div className="flex items-center gap-2">
+                    <Sparkles className="h-4 w-4 text-amber-300" />
+                    <p className="text-sm font-medium text-slate-200">Deduplicación de productos</p>
+                  </div>
+                  <p className="text-xs text-slate-500">Cuántas filas había antes de fusionar duplicados similares.</p>
                   <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-                    <div><p className="text-xs text-muted-foreground">Antes</p><p className="text-base font-semibold">{String(dedupeSummary.before ?? "-")}</p></div>
-                    <div><p className="text-xs text-muted-foreground">Despues</p><p className="text-base font-semibold">{String(dedupeSummary.after ?? "-")}</p></div>
-                    <div><p className="text-xs text-muted-foreground">Eliminados</p><p className="text-base font-semibold">{String(dedupeSummary.removed ?? "-")}</p></div>
-                    <div><p className="text-xs text-muted-foreground">Estado</p><p className="text-base font-semibold">{typeof dedupeSummary.enabled === "boolean" ? (dedupeSummary.enabled ? "Activo" : "Inactivo") : "-"}</p></div>
+                    <SummaryTile label="Antes"><p className="text-xl font-semibold text-white">{String(dedupeSummary.before ?? "—")}</p></SummaryTile>
+                    <SummaryTile label="Después"><p className="text-xl font-semibold text-emerald-200">{String(dedupeSummary.after ?? "—")}</p></SummaryTile>
+                    <SummaryTile label="Eliminadas"><p className="text-xl font-semibold text-amber-200">{String(dedupeSummary.removed ?? "—")}</p></SummaryTile>
+                    <SummaryTile label="Regla">
+                      <p className="text-sm font-semibold text-slate-200">
+                        {typeof dedupeSummary.enabled === "boolean" ? (dedupeSummary.enabled ? "Activa" : "Inactiva") : "—"}
+                      </p>
+                    </SummaryTile>
                   </div>
                   {typeof dedupeSummary.removed === "number" && dedupeSummary.removed > 0 ? (
                     <div className="flex items-start gap-2 rounded-md border border-amber-300/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-100">
                       <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                      Se consolidaron productos similares para evitar duplicados.
+                      Se consolidaron productos similares para evitar duplicados en el resultado final.
                     </div>
                   ) : null}
                 </div>
               ) : null}
 
-              <div className="flex flex-wrap gap-2">
+              <div className="rounded-xl border border-white/8 bg-black/15 p-3">
+                <p className="mb-2 text-[11px] font-medium uppercase tracking-wide text-slate-500">Artefactos exportables</p>
+                <div className="flex flex-wrap gap-2">
                 {masterHtmlUrl ? (
                   <a href={resolveArtifactPreviewUrl(masterHtmlUrl) ?? masterHtmlUrl} target="_blank" rel="noreferrer">
                     <Button size="sm"><FileText className="mr-2 h-4 w-4" />Abrir Master HTML</Button>
@@ -579,7 +763,10 @@ export function JobOverviewView({
                     <Button size="sm" variant="outline"><FileSpreadsheet className="mr-2 h-4 w-4" />Descargar Excel</Button>
                   </a>
                 ) : null}
+                </div>
               </div>
+              </>
+              )}
             </CardContent>
           </Card>
         </div>

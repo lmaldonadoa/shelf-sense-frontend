@@ -15,6 +15,7 @@ import {
   TrainingPanelCard,
   TrainingSectionHero,
 } from "@/components/training/training-ui";
+import { LoadingPanel } from "@/components/ui/async-content";
 
 type Props = { account: string };
 
@@ -175,6 +176,10 @@ export function CategoryMarkersEditor({ account }: Props) {
           {markersQuery.isFetching ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
         </Button>
       </div>
+
+      {markersQuery.isLoading ? (
+        <LoadingPanel message="Cargando markers de categoría…" variant="cards" />
+      ) : null}
 
       <TrainingFormCard title="Nuevo marker de categoria" tone="violet">
           <div className="grid grid-cols-2 gap-4">

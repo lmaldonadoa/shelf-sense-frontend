@@ -25,8 +25,12 @@ import { EnrichmentTokensEditor } from "@/components/training/enrichment-tokens-
 import { PromotionVariantsEditor } from "@/components/training/promotion-variants-editor";
 import { CategoryMarkersEditor } from "@/components/training/category-markers-editor";
 import { MeasureNoiseChainsEditor } from "@/components/training/measure-noise-chains-editor";
+import { PromotionProductDedupeEditor } from "@/components/training/promotion-product-dedupe-editor";
+import { HumanNameNoiseTokensEditor } from "@/components/training/human-name-noise-tokens-editor";
 import { NameNoisePage } from "@/components/training/name-noise-page";
 import { VisionOcrTuningPage } from "@/components/training/vision-ocr-tuning-page";
+import { OcrNoiseReviewConfigEditor } from "@/components/training/ocr-noise-review-config-editor";
+import { isOcrNoiseReviewConfigApiEnabled } from "@/lib/ocr-noise-review-config";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 
@@ -47,15 +51,25 @@ type TrainingTab =
   | "variants"
   | "markers"
   | "measure-noise-chains"
-  | "name-noise";
+  | "human-name-noise-tokens"
+  | "name-noise"
+  | "product-dedupe"
+  | "ocr-noise-review-config";
 
 type TrainingModule = "chains" | "promotions" | "enrichment" | "config" | "curaduria";
 
 const chainsTabs: TrainingTab[] = ["chains", "aliases", "knowledge"];
-const promotionsTabs: TrainingTab[] = ["variants", "markers", "measure-noise-chains"];
-const semanticEnrichmentTabs: TrainingTab[] = ["ignored-phrases", "name-noise", "enrichment-tokens"];
+const promotionsTabs: TrainingTab[] = [
+  "product-dedupe",
+  "measure-noise-chains",
+  "human-name-noise-tokens",
+  "name-noise",
+  "variants",
+  "markers",
+];
+const semanticEnrichmentTabs: TrainingTab[] = ["ignored-phrases", "enrichment-tokens"];
 const semanticConfigTabs: TrainingTab[] = ["semantic-config", "rag-effectiveness", "size-rules", "vision-ocr"];
-const curaduriaTabs: TrainingTab[] = ["lab", "curaduria"];
+const curaduriaTabs: TrainingTab[] = ["lab", "curaduria", "ocr-noise-review-config"];
 
 function moduleForTab(tab: TrainingTab): TrainingModule {
   if (chainsTabs.includes(tab)) return "chains";
@@ -67,7 +81,7 @@ function moduleForTab(tab: TrainingTab): TrainingModule {
 
 function defaultTabForModule(module: TrainingModule): TrainingTab {
   if (module === "chains") return "chains";
-  if (module === "promotions") return "variants";
+  if (module === "promotions") return "product-dedupe";
   if (module === "enrichment") return "ignored-phrases";
   if (module === "config") return "semantic-config";
   return "lab";
@@ -79,9 +93,11 @@ const TAB_LABELS: Partial<Record<TrainingTab, string>> = {
   knowledge: "Conocimiento semantico",
   variants: "Variantes de promocion",
   markers: "Markers de categoria",
-  "measure-noise-chains": "Correccion de medidas",
+  "product-dedupe": "Cardinalidad promociones",
+  "measure-noise-chains": "Correccion de medidas por cadena",
+  "human-name-noise-tokens": "Tokens universales de ruido de nombre",
   "ignored-phrases": "Frases ignoradas",
-  "name-noise": "Ruido de nombres",
+  "name-noise": "Frases ignoradas de nombre",
   "enrichment-tokens": "Tokens de enriquecimiento",
   "vision-ocr": "Vision y OCR",
   "semantic-config": "Configuracion semantica",
@@ -89,6 +105,7 @@ const TAB_LABELS: Partial<Record<TrainingTab, string>> = {
   "rag-effectiveness": "Efectividad RAG",
   lab: "Laboratorio semantico",
   curaduria: "Curaduria de reglas",
+  "ocr-noise-review-config": "Heuristicas revision OCR",
 };
 
 function TrainingModuleCard({
@@ -234,7 +251,7 @@ export function AccountTrainingPage({ account }: Props) {
             onClick={() => selectModule("promotions")}
             icon={<Tag className="h-4 w-4" />}
             label="Promociones"
-            description="Variantes, markers y correccion de medidas"
+            description="Medidas por cadena, tokens de nombre, frases y variantes"
             tone="violet"
           />
           <TrainingModuleCard
@@ -242,7 +259,7 @@ export function AccountTrainingPage({ account }: Props) {
             onClick={() => selectModule("enrichment")}
             icon={<Sparkles className="h-4 w-4" />}
             label="Enriquecimiento"
-            description="Frases ignoradas, ruido de nombres y tokens"
+            description="Frases ignoradas de producto y tokens de enriquecimiento"
             tone="emerald"
           />
           <TrainingModuleCard
@@ -258,7 +275,7 @@ export function AccountTrainingPage({ account }: Props) {
             onClick={() => selectModule("curaduria")}
             icon={<Eye className="h-4 w-4" />}
             label="Curaduria"
-            description="Lab semantico y revision de reglas"
+            description="Lab, revision de reglas y heuristicas OCR"
             tone="rose"
           />
         </div>
@@ -281,12 +298,16 @@ export function AccountTrainingPage({ account }: Props) {
                         ? "Conocimiento RAG"
                         : subTab === "vision-ocr"
                           ? "Vision / OCR"
-                          : subTab === "measure-noise-chains"
-                            ? "Correccion medidas"
-                            : subTab === "ignored-phrases"
+                          : subTab === "product-dedupe"
+                            ? "Cardinalidad"
+                            : subTab === "measure-noise-chains"
+                              ? "Medidas por cadena"
+                              : subTab === "human-name-noise-tokens"
+                                ? "Tokens de nombre"
+                              : subTab === "ignored-phrases"
                                 ? "Frases ignoradas"
                                 : subTab === "name-noise"
-                                  ? "Ruido nombres"
+                                  ? "Frases de nombre"
                                   : subTab === "enrichment-tokens"
                                     ? "Tokens"
                                     : subTab === "semantic-config"
@@ -297,7 +318,11 @@ export function AccountTrainingPage({ account }: Props) {
                                           ? "Efectividad RAG"
                                           : subTab === "curaduria"
                                             ? "Revision"
-                                            : subTab.charAt(0).toUpperCase() + subTab.slice(1).replace(/-/g, " ")
+                                            : subTab === "ocr-noise-review-config"
+                                              ? isOcrNoiseReviewConfigApiEnabled()
+                                                ? "Heuristicas OCR"
+                                                : "Heuristicas OCR (prox.)"
+                                              : subTab.charAt(0).toUpperCase() + subTab.slice(1).replace(/-/g, " ")
                 }
                 onClick={() => setTab(subTab)}
               />
@@ -312,13 +337,15 @@ export function AccountTrainingPage({ account }: Props) {
         {tab === "knowledge" && <AccountSemanticKnowledgePage account={account} />}
 
         {tab === "ignored-phrases" && <IgnoredPhrasesEditor account={account} />}
-        {tab === "name-noise" && <NameNoisePage account={account} />}
         {tab === "enrichment-tokens" && <EnrichmentTokensEditor account={account} />}
-        {tab === "variants" && <PromotionVariantsEditor account={account} />}
-        {tab === "markers" && <CategoryMarkersEditor account={account} />}
+        {tab === "product-dedupe" && <PromotionProductDedupeEditor account={account} />}
         {tab === "measure-noise-chains" && (
           <MeasureNoiseChainsEditor account={account} onGoToChains={() => setTab("chains")} />
         )}
+        {tab === "human-name-noise-tokens" && <HumanNameNoiseTokensEditor account={account} />}
+        {tab === "name-noise" && <NameNoisePage account={account} />}
+        {tab === "variants" && <PromotionVariantsEditor account={account} />}
+        {tab === "markers" && <CategoryMarkersEditor account={account} />}
 
         {tab === "vision-ocr" && <VisionOcrTuningPage account={account} />}
         {tab === "semantic-config" && <SemanticConfigPage account={account} />}
@@ -327,6 +354,7 @@ export function AccountTrainingPage({ account }: Props) {
 
         {tab === "lab" && <AccountSemanticLabPage account={account} />}
         {tab === "curaduria" && <AccountSemanticReviewPage account={account} />}
+        {tab === "ocr-noise-review-config" && <OcrNoiseReviewConfigEditor account={account} />}
       </div>
     </div>
   );

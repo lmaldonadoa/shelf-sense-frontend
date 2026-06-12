@@ -23,7 +23,6 @@ type ListType =
   | "name_guard_descriptors"
   | "name_anchors"
   | "prompt_leak_signature_tokens"
-  | "human_name_noise_tokens"
   | "variant_functional_noise";
 
 const LIST_TYPE_LABELS: Record<ListType, { label: string; description: string }> = {
@@ -42,10 +41,6 @@ const LIST_TYPE_LABELS: Record<ListType, { label: string; description: string }>
   prompt_leak_signature_tokens: {
     label: "Tokens Fuga de Prompt",
     description: "Tokens que indican leak del system prompt (DEJES, OPAQUEN, INSTRUCCIONES, etc.)",
-  },
-  human_name_noise_tokens: {
-    label: "Ruido OCR/Promo",
-    description: "Ruido genérico que se elimina del nombre humano (APLICA, MENOR, PRECIO, etc.)",
   },
   variant_functional_noise: {
     label: "Ruido Funcional de Variantes",

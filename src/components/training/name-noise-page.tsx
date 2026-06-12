@@ -174,16 +174,16 @@ export function NameNoisePage({ account }: Props) {
   return (
     <div className="space-y-4">
       <TrainingSectionHero
-        tone="emerald"
+        tone="violet"
         icon={<Type className="h-4 w-4" />}
-        title="Ruido de nombres"
-        description="Frases de banner, cadena o promocion que no deben contaminar el nombre humanizado. Ej: CORAL, INTERMERCADOS, MINIMERCADOS."
+        title="Frases ignoradas de nombre"
+        description="Frases o slogans de banner, cadena o promocion que no deben contaminar el nombre humanizado. Pueden tener alcance global o por cadena."
         badges={
           <>
             <Badge variant="outline" className="text-[10px]">
               scope: name
             </Badge>
-            <Badge className="border-emerald-400/30 bg-emerald-500/10 text-[10px] text-emerald-200">
+            <Badge className="border-violet-400/30 bg-violet-500/10 text-[10px] text-violet-100">
               {phrases.length} frase{phrases.length !== 1 ? "s" : ""}
             </Badge>
           </>
@@ -218,7 +218,7 @@ export function NameNoisePage({ account }: Props) {
 
       {/* Create / Edit form */}
       {showForm ? (
-        <TrainingFormCard title={editingId != null ? `Editar frase #${editingId}` : "Nueva frase de ruido"} tone="emerald">
+        <TrainingFormCard title={editingId != null ? `Editar frase #${editingId}` : "Nueva frase ignorada"} tone="violet">
             <div className="space-y-1">
               <Label htmlFor="nn-phrase" className="text-xs">Frase</Label>
               <Input
@@ -353,7 +353,8 @@ export function NameNoisePage({ account }: Props) {
 
       <TrainingFooterNote>
         Los cambios se aplican al proximo job creado. No afectan jobs en curso.
-        Estas frases se usan para limpiar ruido del nombre final del producto en el pipeline de promociones.
+        Estas son frases o slogans (ignored phrases scope=name), no tokens unitarios universales.
+        Para PROMOCION, OFERTA, PRECIO y similares, usa Tokens universales de ruido de nombre.
       </TrainingFooterNote>
     </div>
   );

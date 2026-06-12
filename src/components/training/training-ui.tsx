@@ -4,6 +4,8 @@ import type { ReactNode } from "react";
 import { Loader2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { TableSkeleton } from "@/components/ui/async-content";
+import { Skeleton } from "@/components/ui/skeleton";
 
 export type TrainingTone = "sky" | "violet" | "emerald" | "amber" | "rose" | "cyan";
 
@@ -181,9 +183,16 @@ export function TrainingListShell({
     <Card className="border-white/10 bg-white/5">
       <CardContent className="px-0 pb-0">
         {loading ? (
-          <div className="flex items-center justify-center gap-2 py-12 text-sm text-slate-400">
-            <Loader2 className="h-4 w-4 animate-spin" />
-            Cargando...
+          <div className="space-y-4 px-4 py-6" role="status" aria-live="polite" aria-busy="true">
+            <div className="flex items-center gap-2 text-sm text-slate-300">
+              <Loader2 className="h-4 w-4 animate-spin text-cyan-300" />
+              Cargando datos…
+            </div>
+            <TableSkeleton rows={5} cols={4} />
+            <div className="space-y-2">
+              <Skeleton className="h-3 w-full bg-white/8" />
+              <Skeleton className="h-3 w-[85%] bg-white/8" />
+            </div>
           </div>
         ) : empty ? (
           <div className="px-4 py-12 text-center">

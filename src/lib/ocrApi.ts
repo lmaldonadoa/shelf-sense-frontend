@@ -1,4 +1,5 @@
 ﻿import { z } from "zod";
+import { parsePromotionCardinality } from "@/lib/promotion-cardinality";
 import type {
   ActiveConfigResponse,
   AliasListResponse,
@@ -123,6 +124,13 @@ import type {
   MeasureNoiseChainsResponse,
   MeasureNoiseChainUpsertRequest,
   MeasureNoiseChainPatchRequest,
+  HumanNameNoiseToken,
+  HumanNameNoiseTokensResponse,
+  HumanNameNoiseTokenUpsertRequest,
+  HumanNameNoiseTokenPatchRequest,
+  OcrNoiseReviewConfig,
+  OcrNoiseReviewConfigResponse,
+  OcrNoiseReviewConfigPatchRequest,
   IgnoredPhraseSuggestion,
   IgnoredPhraseSuggestionExample,
   IgnoredPhraseSuggestionsResponse,
@@ -366,6 +374,12 @@ function normImage(input: unknown): JobImage {
         ? (x.vision_outputs as Record<string, unknown>[] | Record<string, unknown>)
         : null,
     detections_count: typeof x.detections_count === "number" ? x.detections_count : detections.length,
+    promotion_cardinality: parsePromotionCardinality(x.promotion_cardinality),
+    review_reasons: Array.isArray(x.review_reasons)
+      ? x.review_reasons.map((item) => String(item)).filter(Boolean)
+      : undefined,
+    artifact_summary: x.summary && typeof x.summary === "object" ? (x.summary as Record<string, unknown>) : null,
+    artifact_productos: Array.isArray(x.productos) ? (x.productos as Record<string, unknown>[]) : undefined,
     error_message: typeof x.error_message === "string" ? x.error_message : typeof x.error === "string" ? x.error : null,
   };
 }
@@ -1888,19 +1902,279 @@ export const ocrApi = {
     return (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
   },
 
-  getJobIgnoredPhraseSuggestions: async (jobId: string): Promise<IgnoredPhraseSuggestionsResponse> => {
+  listHumanNameNoiseTokens: async (
+    accountName: string,
+    options?: { includeInactive?: boolean },
+  ): Promise<HumanNameNoiseTokensResponse> => {
+    const includeInactive = options?.includeInactive ?? true;
+    const q = `?include_inactive=${includeInactive ? "true" : "false"}`;
     const body = await request(
-      `/v1/jobs/${encodeURIComponent(jobId)}/ignored-phrases/suggestions`,
+      `/v1/accounts/${encodeURIComponent(accountName)}/human-name-noise-tokens${q}`,
+      { method: "GET" },
+      "No se pudo consultar tokens de ruido de nombre",
+    );
+    const data = (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
+    const rows = Array.isArray(data.tokens) ? data.tokens : [];
+    const tokens: HumanNameNoiseToken[] = [];
+    for (const row of rows) {
+      const x = (row && typeof row === "object" ? row : {}) as Record<string, unknown>;
+      const token = typeof x.token === "string" ? x.token.trim() : "";
+      if (!token) continue;
+      tokens.push({
+        id: typeof x.id === "number" ? x.id : Number(x.id ?? -1),
+        list_type: typeof x.list_type === "string" ? x.list_type : "human_name_noise",
+        token,
+        is_active:
+          typeof x.is_active === "number" || typeof x.is_active === "boolean"
+            ? (x.is_active as number | boolean)
+            : 1,
+        created_at: typeof x.created_at === "string" ? x.created_at : undefined,
+        updated_at: typeof x.updated_at === "string" ? x.updated_at : undefined,
+      });
+    }
+    const seedRaw =
+      data.seed_info && typeof data.seed_info === "object" ? (data.seed_info as Record<string, unknown>) : null;
+    return {
+      account_name: typeof data.account_name === "string" ? data.account_name : accountName,
+      list_type: typeof data.list_type === "string" ? data.list_type : "human_name_noise",
+      tokens,
+      seed_info: seedRaw
+        ? {
+            bootstrapped: typeof seedRaw.bootstrapped === "boolean" ? seedRaw.bootstrapped : undefined,
+            already_seeded: typeof seedRaw.already_seeded === "boolean" ? seedRaw.already_seeded : undefined,
+            list_type: typeof seedRaw.list_type === "string" ? seedRaw.list_type : undefined,
+            seeded_count: typeof seedRaw.seeded_count === "number" ? seedRaw.seeded_count : undefined,
+            version: typeof seedRaw.version === "string" ? seedRaw.version : undefined,
+            error: typeof seedRaw.error === "string" ? seedRaw.error : undefined,
+          }
+        : null,
+    };
+  },
+
+  upsertHumanNameNoiseToken: async (
+    accountName: string,
+    payload: HumanNameNoiseTokenUpsertRequest,
+  ): Promise<HumanNameNoiseToken> => {
+    const body = await request(
+      `/v1/accounts/${encodeURIComponent(accountName)}/human-name-noise-tokens`,
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) },
+      "No se pudo guardar token de ruido de nombre",
+    );
+    const data = (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
+    const row =
+      data.token_item && typeof data.token_item === "object"
+        ? (data.token_item as Record<string, unknown>)
+        : data;
+    return {
+      id: typeof row.id === "number" ? row.id : Number(row.id ?? -1),
+      list_type: typeof row.list_type === "string" ? row.list_type : "human_name_noise",
+      token: typeof row.token === "string" ? row.token : payload.token,
+      is_active:
+        typeof row.is_active === "number" || typeof row.is_active === "boolean"
+          ? (row.is_active as number | boolean)
+          : payload.is_active !== false
+            ? 1
+            : 0,
+      created_at: typeof row.created_at === "string" ? row.created_at : undefined,
+      updated_at: typeof row.updated_at === "string" ? row.updated_at : undefined,
+    };
+  },
+
+  patchHumanNameNoiseToken: async (
+    accountName: string,
+    tokenId: number,
+    payload: HumanNameNoiseTokenPatchRequest,
+  ): Promise<HumanNameNoiseToken> => {
+    const body = await request(
+      `/v1/accounts/${encodeURIComponent(accountName)}/human-name-noise-tokens/${encodeURIComponent(String(tokenId))}`,
+      { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) },
+      "No se pudo actualizar token de ruido de nombre",
+    );
+    const data = (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
+    const row =
+      data.token_item && typeof data.token_item === "object"
+        ? (data.token_item as Record<string, unknown>)
+        : data;
+    return {
+      id: typeof row.id === "number" ? row.id : tokenId,
+      list_type: typeof row.list_type === "string" ? row.list_type : "human_name_noise",
+      token: typeof row.token === "string" ? row.token : payload.token ?? "",
+      is_active:
+        typeof row.is_active === "number" || typeof row.is_active === "boolean"
+          ? (row.is_active as number | boolean)
+          : payload.is_active !== false
+            ? 1
+            : 0,
+      created_at: typeof row.created_at === "string" ? row.created_at : undefined,
+      updated_at: typeof row.updated_at === "string" ? row.updated_at : undefined,
+    };
+  },
+
+  deleteHumanNameNoiseToken: async (accountName: string, tokenId: number): Promise<Record<string, unknown>> => {
+    const body = await request(
+      `/v1/accounts/${encodeURIComponent(accountName)}/human-name-noise-tokens/${encodeURIComponent(String(tokenId))}`,
+      { method: "DELETE" },
+      "No se pudo eliminar token de ruido de nombre",
+    );
+    return (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
+  },
+
+  normalizeOcrNoiseReviewConfig: (raw: unknown): OcrNoiseReviewConfig => {
+    const x = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+    const parseTokenList = (value: unknown): string[] => {
+      if (!Array.isArray(value)) return [];
+      return value.map((item) => String(item ?? "").trim()).filter(Boolean);
+    };
+    const parseRegexList = (value: unknown): string[] => {
+      if (!Array.isArray(value)) return [];
+      return value.map((item) => String(item ?? "").trim()).filter(Boolean);
+    };
+    const scoreRaw = x.score_by_source_kind && typeof x.score_by_source_kind === "object" ? x.score_by_source_kind : {};
+    const score_by_source_kind: Record<string, number> = {};
+    for (const [key, val] of Object.entries(scoreRaw as Record<string, unknown>)) {
+      const name = String(key).trim();
+      if (!name) continue;
+      const num = typeof val === "number" ? val : Number(val);
+      if (Number.isFinite(num)) score_by_source_kind[name] = num;
+    }
+    const parseIntField = (value: unknown, fallback: number, min: number, max: number): number => {
+      const num = typeof value === "number" ? value : Number(value);
+      if (!Number.isFinite(num)) return fallback;
+      return Math.min(max, Math.max(min, Math.round(num)));
+    };
+    const parseFloatField = (value: unknown, fallback: number): number => {
+      const num = typeof value === "number" ? value : Number(value);
+      return Number.isFinite(num) ? num : fallback;
+    };
+    return {
+      product_anchors: parseTokenList(x.product_anchors),
+      function_word_tokens: parseTokenList(x.function_word_tokens),
+      month_tokens: parseTokenList(x.month_tokens),
+      leading_fragment_anchor_regexes: parseRegexList(x.leading_fragment_anchor_regexes),
+      leading_fragment_excluded_anchor_tokens: parseTokenList(x.leading_fragment_excluded_anchor_tokens),
+      phrase_useful_max_tokens: parseIntField(x.phrase_useful_max_tokens, 6, 1, 20),
+      phrase_useful_min_long_token_len: parseIntField(x.phrase_useful_min_long_token_len, 4, 1, 20),
+      phrase_useful_product_overlap_margin: parseIntField(x.phrase_useful_product_overlap_margin, 1, 0, 10),
+      phrase_chunk_direct_max_tokens: parseIntField(x.phrase_chunk_direct_max_tokens, 6, 1, 20),
+      phrase_chunk_window_min_tokens: parseIntField(x.phrase_chunk_window_min_tokens, 2, 1, 10),
+      phrase_chunk_window_max_tokens: parseIntField(x.phrase_chunk_window_max_tokens, 5, 1, 12),
+      score_by_source_kind,
+      score_default: parseFloatField(x.score_default, 0.55),
+      score_occurrence_bonus_threshold: parseIntField(x.score_occurrence_bonus_threshold, 2, 1, 50),
+      score_occurrence_bonus: parseFloatField(x.score_occurrence_bonus, 0.06),
+      score_token_bonus_min: parseIntField(x.score_token_bonus_min, 2, 1, 20),
+      score_token_bonus_max: parseIntField(x.score_token_bonus_max, 4, 1, 20),
+      score_token_bonus: parseFloatField(x.score_token_bonus, 0.04),
+      score_cap: parseFloatField(x.score_cap, 0.99),
+    };
+  },
+
+  getOcrNoiseReviewConfig: async (accountName: string): Promise<OcrNoiseReviewConfigResponse> => {
+    const body = await request(
+      `/v1/accounts/${encodeURIComponent(accountName)}/ocr-noise-review-config`,
+      { method: "GET" },
+      "No se pudo consultar configuracion de revision OCR",
+    );
+    const data = (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
+    const configRaw = data.config && typeof data.config === "object" ? data.config : data;
+    const seedRaw =
+      data.seed_info && typeof data.seed_info === "object" ? (data.seed_info as Record<string, unknown>) : null;
+    return {
+      account_name: typeof data.account_name === "string" ? data.account_name : accountName,
+      config_key: typeof data.config_key === "string" ? data.config_key : "ocr_noise_review",
+      config: ocrApi.normalizeOcrNoiseReviewConfig(configRaw),
+      seed_info: seedRaw
+        ? {
+            version: typeof seedRaw.version === "string" ? seedRaw.version : undefined,
+            bootstrapped: typeof seedRaw.bootstrapped === "boolean" ? seedRaw.bootstrapped : undefined,
+            already_seeded: typeof seedRaw.already_seeded === "boolean" ? seedRaw.already_seeded : undefined,
+            seeded: typeof seedRaw.seeded === "boolean" ? seedRaw.seeded : undefined,
+            error: typeof seedRaw.error === "string" ? seedRaw.error : undefined,
+          }
+        : null,
+    };
+  },
+
+  patchOcrNoiseReviewConfig: async (
+    accountName: string,
+    payload: OcrNoiseReviewConfigPatchRequest,
+  ): Promise<OcrNoiseReviewConfigResponse> => {
+    const body = await request(
+      `/v1/accounts/${encodeURIComponent(accountName)}/ocr-noise-review-config`,
+      { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) },
+      "No se pudo actualizar configuracion de revision OCR",
+    );
+    const data = (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
+    const configRaw = data.config && typeof data.config === "object" ? data.config : data;
+    const seedRaw =
+      data.seed_info && typeof data.seed_info === "object" ? (data.seed_info as Record<string, unknown>) : null;
+    return {
+      account_name: typeof data.account_name === "string" ? data.account_name : accountName,
+      config_key: typeof data.config_key === "string" ? data.config_key : "ocr_noise_review",
+      config: ocrApi.normalizeOcrNoiseReviewConfig(configRaw),
+      seed_info: seedRaw
+        ? {
+            version: typeof seedRaw.version === "string" ? seedRaw.version : undefined,
+            bootstrapped: typeof seedRaw.bootstrapped === "boolean" ? seedRaw.bootstrapped : undefined,
+            already_seeded: typeof seedRaw.already_seeded === "boolean" ? seedRaw.already_seeded : undefined,
+            seeded: typeof seedRaw.seeded === "boolean" ? seedRaw.seeded : undefined,
+            error: typeof seedRaw.error === "string" ? seedRaw.error : undefined,
+          }
+        : null,
+    };
+  },
+
+  resetOcrNoiseReviewConfigDefaults: async (accountName: string): Promise<OcrNoiseReviewConfigResponse> => {
+    const body = await request(
+      `/v1/accounts/${encodeURIComponent(accountName)}/ocr-noise-review-config/reset-defaults`,
+      { method: "POST" },
+      "No se pudo restaurar defaults de revision OCR",
+    );
+    const data = (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
+    const configRaw = data.config && typeof data.config === "object" ? data.config : data;
+    const seedRaw =
+      data.seed_info && typeof data.seed_info === "object" ? (data.seed_info as Record<string, unknown>) : null;
+    return {
+      account_name: typeof data.account_name === "string" ? data.account_name : accountName,
+      config_key: typeof data.config_key === "string" ? data.config_key : "ocr_noise_review",
+      config: ocrApi.normalizeOcrNoiseReviewConfig(configRaw),
+      seed_info: seedRaw
+        ? {
+            version: typeof seedRaw.version === "string" ? seedRaw.version : undefined,
+            bootstrapped: typeof seedRaw.bootstrapped === "boolean" ? seedRaw.bootstrapped : undefined,
+            already_seeded: typeof seedRaw.already_seeded === "boolean" ? seedRaw.already_seeded : undefined,
+            seeded: typeof seedRaw.seeded === "boolean" ? seedRaw.seeded : undefined,
+            error: typeof seedRaw.error === "string" ? seedRaw.error : undefined,
+          }
+        : null,
+    };
+  },
+
+  getJobIgnoredPhraseSuggestions: async (
+    jobId: string,
+    options?: { includeExistingPhrases?: boolean; includeSupportCandidates?: boolean },
+  ): Promise<IgnoredPhraseSuggestionsResponse> => {
+    const includeExisting = options?.includeExistingPhrases ?? false;
+    const includeSupport = options?.includeSupportCandidates ?? true;
+    const q = new URLSearchParams({
+      include_existing_phrases: includeExisting ? "true" : "false",
+      include_support_candidates: includeSupport ? "true" : "false",
+    });
+    const body = await request(
+      `/v1/jobs/${encodeURIComponent(jobId)}/ignored-phrases/suggestions?${q.toString()}`,
       { method: "GET" },
       "No se pudieron cargar sugerencias de ruido",
     );
     const raw = (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
-    const parseExample = (e: unknown): { snippet: string; image_process_code?: string | null; source_kind?: string | null } => {
+    const parseExample = (e: unknown): IgnoredPhraseSuggestionExample => {
       const ex = (e && typeof e === "object" ? e : {}) as Record<string, unknown>;
+      const imageCode = ex.image_process_code;
       return {
         snippet: typeof ex.snippet === "string" ? ex.snippet : "",
-        image_process_code: typeof ex.image_process_code === "string" ? ex.image_process_code : null,
+        image_process_code:
+          typeof imageCode === "string" || typeof imageCode === "number" ? imageCode : null,
         source_kind: typeof ex.source_kind === "string" ? ex.source_kind : null,
+        job_id: typeof ex.job_id === "string" ? ex.job_id : null,
       };
     };
     const parseSuggestion = (item: unknown): IgnoredPhraseSuggestion => {
@@ -1914,6 +2188,14 @@ export const ocrApi = {
         snippet: typeof x.snippet === "string" ? x.snippet : null,
         examples: Array.isArray(x.examples) ? x.examples.map(parseExample) : [],
         already_exists: typeof x.already_exists === "boolean" ? x.already_exists : false,
+        suggested_scope: typeof x.suggested_scope === "string" ? x.suggested_scope : undefined,
+        existing_is_active:
+          typeof x.existing_is_active === "boolean"
+            ? x.existing_is_active
+            : typeof x.existing_is_active === "number"
+              ? x.existing_is_active === 1
+              : null,
+        candidate_kind: typeof x.candidate_kind === "string" ? x.candidate_kind : undefined,
       };
     };
     return {
@@ -3308,6 +3590,10 @@ export const ocrApi = {
     const dedupeRaw =
       (data.dedupe_summary && typeof data.dedupe_summary === "object" ? data.dedupe_summary : undefined) ??
       (nested.dedupe_summary && typeof nested.dedupe_summary === "object" ? nested.dedupe_summary : undefined);
+    const promotionCardinalityRaw =
+      data.promotion_cardinality ??
+      nested.promotion_cardinality ??
+      (nestedUserResponse?.promotion_cardinality ?? topUserResponse?.promotion_cardinality);
 
     const artifactsImage = Array.isArray(nested.image_artifacts)
       ? nested.image_artifacts
@@ -3329,6 +3615,7 @@ export const ocrApi = {
             enabled: typeof (dedupeRaw as Record<string, unknown>).enabled === "boolean" ? ((dedupeRaw as Record<string, unknown>).enabled as boolean) : undefined,
           }
         : null,
+      promotion_cardinality: parsePromotionCardinality(promotionCardinalityRaw),
       products:
         normalizedProducts ??
         (Array.isArray(data.products) ? (data.products as Record<string, unknown>[]) : undefined) ??

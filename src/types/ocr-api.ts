@@ -81,6 +81,7 @@ export type TextEnrichmentConfig = {
     chains?: string[];
     [key: string]: unknown;
   };
+  product_dedupe?: ProductDedupeConfig;
   size_plausibility_guardrail?: {
     enabled?: boolean;
     subcategory_rules_extra?: Array<{
@@ -334,6 +335,10 @@ export type JobImage = {
   analysis_trace?: AnalysisTraceItem[];
   primary_crops?: PrimaryCrop[];
   promotions_extracted?: Record<string, unknown>[];
+  promotion_cardinality?: PromotionCardinality | null;
+  review_reasons?: string[];
+  artifact_summary?: Record<string, unknown> | null;
+  artifact_productos?: Record<string, unknown>[];
   ocr_raw_text_primary?: string | null;
   ocr_raw_text_support?: string | null;
   vision_outputs?: Record<string, unknown>[] | Record<string, unknown> | null;
@@ -509,6 +514,53 @@ export type JobMetricsResponse = {
   summary_by_step: Record<string, JobMetricsSummaryItem>;
 };
 
+export type PromotionCardinalityStatus =
+  | "one_to_one"
+  | "corrected_to_one_to_one"
+  | "mismatch"
+  | "unverifiable_no_primary_promotions";
+
+export interface PromotionCardinalityDecision {
+  crop: string;
+  winner: string;
+  removed_products: string[];
+  strategy: "best_evidence" | string;
+  reason: "one_product_per_primary_promotion" | string;
+}
+
+export interface PromotionCropCount {
+  crop: string;
+  product_count: number;
+}
+
+export interface PromotionCardinality {
+  enabled?: boolean;
+  verifiable?: boolean;
+  status?: PromotionCardinalityStatus | string;
+  detected_promotions?: number;
+  expected_products?: number | null;
+  products_before?: number;
+  products_after?: number;
+  promotions_with_product?: number;
+  primary_promotion_crops?: string[];
+  products_per_promotion_before?: Record<string, number>;
+  products_per_promotion_after?: Record<string, number>;
+  missing_promotion_crops?: string[];
+  multiple_product_crops_before?: PromotionCropCount[];
+  multiple_product_crops_after?: PromotionCropCount[];
+  removed?: number;
+  decisions?: PromotionCardinalityDecision[];
+  review_required?: boolean;
+  review_reasons?: string[];
+}
+
+export type ProductDedupeConfig = {
+  block_cross_primary_promotion_crop_merge?: boolean;
+  one_product_per_primary_promotion_enabled?: boolean;
+  one_product_per_primary_promotion_strategy?: string;
+  [key: string]: unknown;
+};
+
 export type JobResultsResponse = {
   job_id?: string;
   summary?: Record<string, unknown>;
@@ -518,6 +570,7 @@ export type JobResultsResponse = {
     removed?: number;
     enabled?: boolean;
   } | null;
+  promotion_cardinality?: PromotionCardinality | null;
   products?: Record<string, unknown>[];
   extracted_products?: Record<string, unknown>[];
   support_detections?: Record<string, unknown>[];
@@ -1847,12 +1900,48 @@ export type MeasureNoiseChainPatchRequest = {
   notes?: string;
 };
 
+export type HumanNameNoiseToken = {
+  id: number;
+  list_type: string;
+  token: string;
+  is_active: number | boolean;
+  created_at?: string;
+  updated_at?: string;
+};
+
+export type HumanNameNoiseTokenSeedInfo = {
+  bootstrapped?: boolean;
+  already_seeded?: boolean;
+  list_type?: string;
+  seeded_count?: number;
+  version?: string;
+  error?: string;
+};
+
+export type HumanNameNoiseTokensResponse = {
+  account_name: string;
+  list_type: string;
+  tokens: HumanNameNoiseToken[];
+  seed_info?: HumanNameNoiseTokenSeedInfo | null;
+};
+
+export type HumanNameNoiseTokenUpsertRequest = {
+  token: string;
+  is_active?: boolean;
+};
+
+export type HumanNameNoiseTokenPatchRequest = {
+  token?: string;
+  is_active?: boolean;
+};
+
 // ── Job ignored-phrase suggestions (noise review) ──────────────
 
 export type IgnoredPhraseSuggestionExample = {
   snippet: string;
-  image_process_code?: string | null;
+  image_process_code?: string | number | null;
   source_kind?: string | null;
+  job_id?: string | null;
   [key: string]: unknown;
 };
 
@@ -1865,6 +1954,9 @@ export type IgnoredPhraseSuggestion = {
   snippet?: string | null;
   examples?: IgnoredPhraseSuggestionExample[];
   already_exists: boolean;
+  suggested_scope?: string;
+  existing_is_active?: boolean | null;
+  candidate_kind?: string;
   [key: string]: unknown;
 };
 
@@ -1875,6 +1967,12 @@ export type IgnoredPhraseSuggestionsResponse = {
     total_phrases_scanned?: number;
     total_suggestions?: number;
     total_already_saved?: number;
+    image_rows_matched?: number;
+    images_scanned_with_json?: number;
+    images_with_candidates?: number;
+    existing_name_noise_phrases?: number;
+    phrase_suggestions?: number;
+    support_candidates?: number;
     [key: string]: unknown;
   };
   job_context?: {
@@ -1890,6 +1988,45 @@ export type IgnoredPhraseSuggestionsResponse = {
   };
   [key: string]: unknown;
 };
+
+export type OcrNoiseReviewConfig = {
+  product_anchors: string[];
+  function_word_tokens: string[];
+  month_tokens: string[];
+  leading_fragment_anchor_regexes: string[];
+  leading_fragment_excluded_anchor_tokens: string[];
+  phrase_useful_max_tokens: number;
+  phrase_useful_min_long_token_len: number;
+  phrase_useful_product_overlap_margin: number;
+  phrase_chunk_direct_max_tokens: number;
+  phrase_chunk_window_min_tokens: number;
+  phrase_chunk_window_max_tokens: number;
+  score_by_source_kind: Record<string, number>;
+  score_default: number;
+  score_occurrence_bonus_threshold: number;
+  score_occurrence_bonus: number;
+  score_token_bonus_min: number;
+  score_token_bonus_max: number;
+  score_token_bonus: number;
+  score_cap: number;
+};
+
+export type OcrNoiseReviewConfigSeedInfo = {
+  version?: string;
+  bootstrapped?: boolean;
+  already_seeded?: boolean;
+  seeded?: boolean;
+  error?: string;
+};
+
+export type OcrNoiseReviewConfigResponse = {
+  account_name: string;
+  config_key: string;
+  config: OcrNoiseReviewConfig;
+  seed_info?: OcrNoiseReviewConfigSeedInfo | null;
+};
+
+export type OcrNoiseReviewConfigPatchRequest = Partial<OcrNoiseReviewConfig>;
 
 export type AccountPromptSlot = "ocr" | "vision" | string;
 
