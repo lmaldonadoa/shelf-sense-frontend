@@ -2,14 +2,19 @@
 
 import { useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { Plus, Trash2, Loader2, Save, ChevronDown, ChevronUp } from "lucide-react";
+import { Bookmark, ChevronDown, ChevronUp, Loader2, RefreshCw, Save, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
+import {
+  TrainingFooterNote,
+  TrainingFormCard,
+  TrainingPanelCard,
+  TrainingSectionHero,
+} from "@/components/training/training-ui";
 
 type Props = { account: string };
 
@@ -140,14 +145,38 @@ export function CategoryMarkersEditor({ account }: Props) {
   const data = markersQuery.data || { defaults: [], custom: [], effective: [] };
 
   return (
-    <div className="space-y-6">
-      {/* Form */}
-      <Card className="border-white/10 bg-white/5">
-        <CardHeader>
-          <CardTitle>Agregar/Editar Marker de Categoría</CardTitle>
-          <CardDescription>Detecta subcategorías desde texto OCR de soporte</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
+    <div className="space-y-4">
+      <TrainingSectionHero
+        tone="violet"
+        icon={<Bookmark className="h-4 w-4" />}
+        title="Markers de categoria"
+        description="Detecta subcategorias desde texto OCR de soporte. Menor prioridad = se evalua primero."
+        badges={
+          <Badge variant="outline" className="border-violet-400/30 text-[10px] text-violet-100">
+            promotions
+          </Badge>
+        }
+        kpis={[
+          { label: "Defaults", value: data.defaults?.length ?? 0 },
+          { label: "Custom", value: data.custom?.length ?? 0 },
+          { label: "Efectivos", value: data.effective?.length ?? 0 },
+          { label: "Prioridad media", value: data.custom?.length ? Math.round(data.custom.reduce((s: number, m: { priority?: number }) => s + (m.priority ?? 100), 0) / data.custom.length) : "—" },
+        ]}
+      />
+
+      <div className="flex flex-wrap items-center gap-2">
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-9"
+          onClick={() => markersQuery.refetch()}
+          disabled={markersQuery.isFetching}
+        >
+          {markersQuery.isFetching ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+        </Button>
+      </div>
+
+      <TrainingFormCard title="Nuevo marker de categoria" tone="violet">
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
               <Label htmlFor="marker">Marker (texto a buscar)</Label>
@@ -191,15 +220,16 @@ export function CategoryMarkersEditor({ account }: Props) {
             </div>
 
             {/* Priority Quick Select */}
-            <div className="grid grid-cols-3 gap-2 mt-2">
+            <div className="mt-2 grid grid-cols-3 gap-2">
               {PRIORITY_GUIDE.map(g => (
                 <button
                   key={g.priority}
+                  type="button"
                   onClick={() => setFormData(prev => ({ ...prev, priority: g.priority }))}
-                  className={`text-xs p-2 rounded border transition-all ${
+                  className={`rounded-lg border p-2 text-xs transition-all ${
                     formData.priority === g.priority
-                      ? "bg-blue-900/50 border-blue-400"
-                      : "border-white/10 bg-white/3 hover:bg-white/5"
+                      ? "border-violet-400/40 bg-violet-500/15 text-violet-100"
+                      : "border-white/10 bg-black/20 hover:border-white/20"
                   }`}
                 >
                   <p className="font-semibold">{g.priority}</p>
@@ -247,78 +277,73 @@ export function CategoryMarkersEditor({ account }: Props) {
             />
           </div>
 
-          <Button onClick={() => upsertMutation.mutate()} disabled={upsertMutation.isPending} className="gap-2 w-full">
-            {upsertMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
-            Guardar Marker
-          </Button>
-        </CardContent>
-      </Card>
+        <Button size="sm" className="h-8 w-full gap-1.5" onClick={() => upsertMutation.mutate()} disabled={upsertMutation.isPending}>
+          {upsertMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
+          Guardar marker
+        </Button>
+      </TrainingFormCard>
 
-      {/* Defaults */}
-      {data.defaults?.length > 0 && (
-        <Card className="border-white/10 bg-white/5">
-          <CardHeader
-            className="cursor-pointer"
-            onClick={() => setExpandedDefaults(!expandedDefaults)}
-          >
-            <CardTitle className="text-sm flex items-center justify-between">
-              <span>Markers por Defecto ({data.defaults.length})</span>
+      {data.defaults?.length > 0 ? (
+        <TrainingPanelCard
+          title={`Defaults del sistema (${data.defaults.length})`}
+          action={
+            <button type="button" onClick={() => setExpandedDefaults(!expandedDefaults)} className="text-slate-400">
               {expandedDefaults ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
-            </CardTitle>
-          </CardHeader>
-          {expandedDefaults && (
-            <CardContent className="space-y-2">
-              {data.defaults.map((m: any) => (
-                <div key={m.marker} className="flex items-center justify-between rounded border border-white/10 bg-white/3 p-2">
-                  <div className="text-sm">
-                    <p className="font-mono font-semibold">{m.marker}</p>
-                    <p className="text-xs text-white/60">→ {m.canonical}</p>
+            </button>
+          }
+        >
+          {expandedDefaults ? (
+            <div className="max-h-[min(40vh,360px)] space-y-2 overflow-y-auto">
+              {data.defaults.map((m: CategoryMarker) => (
+                <div key={m.marker} className="flex items-center justify-between rounded-lg border border-white/10 bg-black/20 px-3 py-2">
+                  <div>
+                    <p className="font-mono text-xs font-semibold text-violet-100">{m.marker}</p>
+                    <p className="text-[10px] text-slate-500">→ {m.canonical}</p>
                   </div>
-                  <Badge variant="outline" className="text-xs">P{m.priority}</Badge>
+                  <Badge variant="outline" className="h-4 text-[9px]">
+                    P{m.priority}
+                  </Badge>
                 </div>
               ))}
-            </CardContent>
+            </div>
+          ) : (
+            <p className="text-[11px] text-slate-500">Click para expandir {data.defaults.length} markers de sistema.</p>
           )}
-        </Card>
-      )}
+        </TrainingPanelCard>
+      ) : null}
 
-      {/* Custom */}
-      {data.custom?.length > 0 && (
-        <Card className="border-white/10 bg-white/5">
-          <CardHeader>
-            <CardTitle className="text-sm">Markers Personalizados ({data.custom.length})</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-2">
-            {data.custom.map((m: any) => (
-              <div key={m.id} className="flex items-center justify-between rounded border border-white/10 bg-white/3 p-3">
-                <div className="flex-1">
-                  <p className="font-mono font-semibold">{m.marker}</p>
-                  <p className="text-xs text-white/60">→ {m.canonical}</p>
-                  {m.chain_whitelist?.length > 0 && (
-                    <p className="text-xs text-white/60">Cadenas: {m.chain_whitelist.join(", ")}</p>
-                  )}
-                  {m.notes && <p className="text-xs text-blue-300">📝 {m.notes}</p>}
+      {data.custom?.length > 0 ? (
+        <TrainingPanelCard title={`Markers personalizados (${data.custom.length})`}>
+          <div className="max-h-[min(50vh,480px)] space-y-2 overflow-y-auto">
+            {data.custom.map((m: CategoryMarker & { id: number }) => (
+              <div key={m.id} className="flex items-center justify-between gap-2 rounded-lg border border-white/10 bg-black/20 px-3 py-2.5">
+                <div className="min-w-0 flex-1">
+                  <p className="font-mono text-xs font-semibold text-white">{m.marker}</p>
+                  <p className="text-[10px] text-slate-500">→ {m.canonical}</p>
+                  {m.notes ? <p className="mt-1 text-[10px] text-violet-300">{m.notes}</p> : null}
                 </div>
-                <div className="flex items-center gap-3">
-                  <Badge variant="outline" className="text-xs">P{m.priority}</Badge>
+                <div className="flex shrink-0 items-center gap-2">
+                  <Badge variant="outline" className="h-4 text-[9px]">
+                    P{m.priority}
+                  </Badge>
                   <Button
                     onClick={() => m.id && deleteMutation.mutate(m.id)}
-                    variant="destructive"
+                    variant="ghost"
                     size="sm"
+                    className="h-7 w-7 p-0 text-rose-400 hover:text-rose-300"
                   >
-                    <Trash2 className="h-3 w-3" />
+                    <Trash2 className="h-3.5 w-3.5" />
                   </Button>
                 </div>
               </div>
             ))}
-          </CardContent>
-        </Card>
-      )}
+          </div>
+        </TrainingPanelCard>
+      ) : null}
 
-      <div className="rounded border border-blue-500/30 bg-blue-950/20 p-3 text-sm text-blue-200">
-        <p className="font-semibold">ℹ️ Nota:</p>
-        <p>Los cambios se aplican al próximo job creado. No afectan jobs en curso.</p>
-      </div>
+      <TrainingFooterNote>
+        Los cambios se aplican al proximo job creado. No afectan jobs en curso.
+      </TrainingFooterNote>
     </div>
   );
 }

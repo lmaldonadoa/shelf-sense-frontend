@@ -1,315 +1,501 @@
 "use client";
 
-import { useState } from "react";
-import { useMutation, useQuery } from "@tanstack/react-query";
-import { Plus, Trash2, Loader2, Save, AlertCircle } from "lucide-react";
+import { useMemo, useState, type ReactNode } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { AlertCircle, ArrowRight, Edit2, Info, Loader2, Plus, Ruler, Search, ShieldCheck, Trash2, X } from "lucide-react";
 import { toast } from "sonner";
+import { HttpError, ocrApi } from "@/lib/ocrApi";
+import type { MeasureNoiseChain } from "@/types/ocr-api";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  TrainingFooterNote,
+  TrainingFormCard,
+  TrainingListShell,
+  TrainingSectionHero,
+} from "@/components/training/training-ui";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Badge } from "@/components/ui/badge";
+import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 
-type Props = { account: string };
-
-type MeasureNoiseChain = {
-  chain_code: string;
-  is_active?: boolean;
-  notes?: string;
+type Props = {
+  account: string;
+  onGoToChains?: () => void;
 };
 
-export function MeasureNoiseChainsEditor({ account }: Props) {
-  const [accountName] = useState(account);
-  const [formData, setFormData] = useState<MeasureNoiseChain>({
-    chain_code: "",
-    is_active: true,
-    notes: "",
-  });
+function formatDate(value?: string | null): string {
+  if (!value) return "-";
+  try {
+    return new Date(value).toLocaleString("es", {
+      day: "2-digit",
+      month: "short",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  } catch {
+    return value;
+  }
+}
+
+function isChainActive(value: MeasureNoiseChain["is_active"]): boolean {
+  return value === 1 || value === true;
+}
+
+function normalizeChainCode(raw: string): string {
+  return raw.trim().toLowerCase();
+}
+
+function MeasureNoiseScopeTable({
+  items,
+  onEdit,
+  onToggle,
+  onRemove,
+  isRemoving,
+}: {
+  items: MeasureNoiseChain[];
+  onEdit: (item: MeasureNoiseChain) => void;
+  onToggle: (chainCode: string, active: boolean) => void;
+  onRemove: (chainCode: string) => void;
+  isRemoving: boolean;
+}) {
+  return (
+    <div>
+      <div className="sticky top-0 z-10 grid min-w-[720px] grid-cols-[minmax(140px,1.1fr)_minmax(180px,1.4fr)_72px_minmax(120px,0.9fr)_88px] items-center gap-2 border-b border-white/10 bg-slate-950/90 px-4 py-2 text-[10px] uppercase tracking-wide text-slate-500 backdrop-blur">
+        <span>chain_code</span>
+        <span>Notas</span>
+        <span className="text-center">Regla activa</span>
+        <span className="text-center">Actualizada</span>
+        <span className="text-center">Acciones</span>
+      </div>
+      <div className="min-w-[720px] divide-y divide-white/5">
+        {items.map((item) => {
+          const active = isChainActive(item.is_active);
+          return (
+            <div
+              key={`mnc-${item.id}-${item.chain_code}`}
+              className={`grid grid-cols-[minmax(140px,1.1fr)_minmax(180px,1.4fr)_72px_minmax(120px,0.9fr)_88px] items-center gap-2 px-4 py-2.5 hover:bg-white/[0.03] ${!active ? "opacity-55" : ""}`}
+            >
+              <div className="min-w-0">
+                <p className="truncate font-mono text-xs text-white">{item.chain_code}</p>
+              </div>
+              <div className="min-w-0">
+                <p className="line-clamp-2 text-[11px] text-slate-400">{item.notes?.trim() || "—"}</p>
+              </div>
+              <div className="flex justify-center">
+                <Switch
+                  checked={active}
+                  onCheckedChange={(checked) => onToggle(item.chain_code, checked)}
+                  className="scale-75"
+                />
+              </div>
+              <div className="text-center">
+                <span className="text-[10px] text-slate-500">{formatDate(item.updated_at ?? item.created_at)}</span>
+              </div>
+              <div className="flex justify-center gap-1">
+                <Button size="sm" variant="ghost" className="h-6 w-6 p-0" onClick={() => onEdit(item)} title="Editar alcance">
+                  <Edit2 className="h-3 w-3" />
+                </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-6 w-6 p-0 text-rose-400 hover:text-rose-300"
+                  onClick={() => {
+                    if (
+                      confirm(
+                        `Quitar el alcance de "${item.chain_code}"? La correccion de medidas dejara de aplicarse en esa cadena.`,
+                      )
+                    ) {
+                      onRemove(item.chain_code);
+                    }
+                  }}
+                  disabled={isRemoving}
+                  title="Quitar alcance"
+                >
+                  <Trash2 className="h-3 w-3" />
+                </Button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+export function MeasureNoiseChainsEditor({ account, onGoToChains }: Props) {
+  const queryClient = useQueryClient();
+  const [search, setSearch] = useState("");
+  const [showInactive, setShowInactive] = useState(true);
+
+  const [showForm, setShowForm] = useState(false);
+  const [editingChainCode, setEditingChainCode] = useState<string | null>(null);
+  const [chainCodeInput, setChainCodeInput] = useState("");
+  const [notesInput, setNotesInput] = useState("");
+  const [isActiveInput, setIsActiveInput] = useState(true);
+
+  const queryKey = ["measure-noise-chains", account, showInactive];
 
   const chainsQuery = useQuery({
-    queryKey: ["measure-noise-chains", accountName],
-    queryFn: async () => {
-      try {
-        const response = await fetch(
-          `/admin/ocr/proxy/v1/accounts/${encodeURIComponent(accountName)}/promotion-measure-noise-chains`
-        );
-        if (!response.ok) throw new Error("Failed to fetch chains");
-        return response.json();
-      } catch {
-        return { defaults: [], custom: [], effective: [], effective_source: "defaults" };
-      }
-    },
+    queryKey,
+    queryFn: () => ocrApi.listMeasureNoiseChains(account, { includeInactive: showInactive }),
+    enabled: Boolean(account?.trim()),
+    retry: 1,
+    staleTime: 30_000,
   });
 
-  const upsertMutation = useMutation({
+  const chains = chainsQuery.isError ? [] : (chainsQuery.data?.measure_noise_chains ?? []);
+
+  const loadErrorMessage =
+    chainsQuery.error instanceof HttpError
+      ? chainsQuery.error.detail
+      : chainsQuery.error instanceof Error
+        ? chainsQuery.error.message
+        : chainsQuery.isError
+          ? "No se pudo cargar el alcance de la regla."
+          : null;
+
+  const filteredChains = useMemo(() => {
+    if (!search.trim()) return chains;
+    const q = search.trim().toLowerCase();
+    return chains.filter(
+      (item) =>
+        item.chain_code.toLowerCase().includes(q) ||
+        String(item.notes ?? "")
+          .toLowerCase()
+          .includes(q),
+    );
+  }, [chains, search]);
+
+  const activeCount = useMemo(() => chains.filter((item) => isChainActive(item.is_active)).length, [chains]);
+
+  function resetForm() {
+    setEditingChainCode(null);
+    setChainCodeInput("");
+    setNotesInput("");
+    setIsActiveInput(true);
+    setShowForm(false);
+  }
+
+  function startActivate() {
+    resetForm();
+    setShowForm(true);
+  }
+
+  function startEditScope(item: MeasureNoiseChain) {
+    setEditingChainCode(item.chain_code);
+    setChainCodeInput(item.chain_code);
+    setNotesInput(item.notes ?? "");
+    setIsActiveInput(isChainActive(item.is_active));
+    setShowForm(true);
+  }
+
+  function handleApiError(error: unknown, fallbackTitle: string) {
+    if (error instanceof HttpError) {
+      if (error.status === 404) {
+        toast.error("No encontrado", { description: "El alcance ya no existe. Refrescando lista." });
+        queryClient.invalidateQueries({ queryKey });
+        resetForm();
+        return;
+      }
+      toast.error(fallbackTitle, { description: error.detail });
+      return;
+    }
+    const detail = error instanceof Error ? error.message : "Error inesperado";
+    toast.error(fallbackTitle, { description: detail });
+  }
+
+  const activateMutation = useMutation({
     mutationFn: async () => {
-      if (!formData.chain_code.trim()) throw new Error("Chain code es obligatorio");
-
-      const payload = {
-        chain_code: formData.chain_code.trim().toLowerCase(),
-        is_active: formData.is_active !== false,
-        notes: formData.notes?.trim(),
-      };
-
-      const response = await fetch(
-        `/admin/ocr/proxy/v1/accounts/${encodeURIComponent(accountName)}/promotion-measure-noise-chains`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-        }
-      );
-
-      if (!response.ok) throw new Error("Failed to upsert chain");
-      return response.json();
+      const chain_code = normalizeChainCode(chainCodeInput);
+      if (!chain_code) throw new Error("El codigo de cadena no puede estar vacio.");
+      return ocrApi.upsertMeasureNoiseChain(account, {
+        chain_code,
+        is_active: isActiveInput,
+        notes: notesInput.trim() || undefined,
+      });
     },
     onSuccess: () => {
-      toast.success("Cadena guardada");
-      chainsQuery.refetch();
+      toast.success("Regla activada para la cadena");
+      queryClient.invalidateQueries({ queryKey: ["measure-noise-chains", account] });
       resetForm();
     },
-    onError: (error) => {
-      toast.error(`Error: ${error instanceof Error ? error.message : "Desconocido"}`);
-    },
+    onError: (error) => handleApiError(error, "No se pudo activar la regla en esa cadena"),
   });
 
-  const seedMutation = useMutation({
+  const patchScopeMutation = useMutation({
     mutationFn: async () => {
-      const response = await fetch(
-        `/admin/ocr/proxy/v1/accounts/${encodeURIComponent(accountName)}/promotion-measure-noise-chains/seed-defaults`,
-        { method: "POST" }
-      );
-      if (!response.ok) throw new Error("Failed to seed defaults");
-      return response.json();
+      if (!editingChainCode) throw new Error("Sin cadena en el alcance.");
+      return ocrApi.patchMeasureNoiseChain(account, editingChainCode, {
+        notes: notesInput.trim() || undefined,
+        is_active: isActiveInput,
+      });
     },
     onSuccess: () => {
-      toast.success("Defaults sembrados");
-      chainsQuery.refetch();
+      toast.success("Alcance de la regla actualizado");
+      queryClient.invalidateQueries({ queryKey: ["measure-noise-chains", account] });
+      resetForm();
     },
-    onError: (error) => {
-      toast.error(`Error: ${error instanceof Error ? error.message : "Desconocido"}`);
-    },
+    onError: (error) => handleApiError(error, "No se pudo actualizar el alcance"),
   });
 
-  const deleteMutation = useMutation({
-    mutationFn: async (chainId: number) => {
-      const response = await fetch(
-        `/admin/ocr/proxy/v1/accounts/${encodeURIComponent(accountName)}/promotion-measure-noise-chains/${chainId}`,
-        { method: "DELETE" }
-      );
-      if (!response.ok) throw new Error("Failed to delete chain");
-      return response.json();
-    },
+  const toggleActiveMutation = useMutation({
+    mutationFn: async ({ chainCode, active }: { chainCode: string; active: boolean }) =>
+      ocrApi.patchMeasureNoiseChain(account, chainCode, { is_active: active }),
     onSuccess: () => {
-      toast.success("Cadena eliminada");
-      chainsQuery.refetch();
+      queryClient.invalidateQueries({ queryKey: ["measure-noise-chains", account] });
     },
-    onError: (error) => {
-      toast.error(`Error: ${error instanceof Error ? error.message : "Desconocido"}`);
-    },
+    onError: (error) => handleApiError(error, "No se pudo cambiar el estado de la regla"),
   });
 
-  const toggleMutation = useMutation({
-    mutationFn: async (chainId: number, isActive: boolean) => {
-      const response = await fetch(
-        `/admin/ocr/proxy/v1/accounts/${encodeURIComponent(accountName)}/promotion-measure-noise-chains/${chainId}`,
-        {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ is_active: !isActive }),
-        }
-      );
-      if (!response.ok) throw new Error("Failed to toggle chain");
-      return response.json();
-    },
+  const removeScopeMutation = useMutation({
+    mutationFn: async (chainCode: string) => ocrApi.deleteMeasureNoiseChain(account, chainCode),
     onSuccess: () => {
-      chainsQuery.refetch();
+      toast.success("Regla desactivada para la cadena");
+      queryClient.invalidateQueries({ queryKey: ["measure-noise-chains", account] });
+      if (editingChainCode) resetForm();
     },
-    onError: (error) => {
-      toast.error(`Error: ${error instanceof Error ? error.message : "Desconocido"}`);
-    },
+    onError: (error) => handleApiError(error, "No se pudo quitar el alcance"),
   });
 
-  const resetForm = () => {
-    setFormData({
-      chain_code: "",
-      is_active: true,
-      notes: "",
-    });
-  };
+  const isSaving = activateMutation.isPending || patchScopeMutation.isPending;
 
-  const data = chainsQuery.data || { defaults: [], custom: [], effective: [], effective_source: "defaults" };
+  let listContent: ReactNode;
+  if (chainsQuery.isError) {
+    listContent = (
+      <div className="px-4 py-10 text-center text-sm text-slate-500">
+        Corrige el error de carga arriba para ver las cadenas activadas.
+      </div>
+    );
+  } else {
+    listContent = (
+      <MeasureNoiseScopeTable
+        items={filteredChains}
+        onEdit={startEditScope}
+        onToggle={(chainCode, active) => toggleActiveMutation.mutate({ chainCode, active })}
+        onRemove={(chainCode) => removeScopeMutation.mutate(chainCode)}
+        isRemoving={removeScopeMutation.isPending}
+      />
+    );
+  }
 
   return (
-    <div className="space-y-6">
-      {/* Status Banner */}
-      {data.effective_source === "defaults" && (
-        <Card className="border-blue-500/30 bg-blue-950/20">
-          <CardContent className="pt-6 flex items-start gap-3">
-            <AlertCircle className="h-5 w-5 text-blue-400 flex-shrink-0 mt-0.5" />
-            <div>
-              <p className="font-semibold text-blue-200">Usando Configuración por Defecto</p>
-              <p className="text-sm text-blue-300 mt-1">
-                Tu cuenta usa los defaults históricos de 4 cadenas. Pulsa "Personalizar" para empezar a editar.
+    <div className="space-y-4">
+      <TrainingSectionHero
+        tone="violet"
+        icon={<Ruler className="h-4 w-4" />}
+        title="Correccion de medidas"
+        description="Activa esta regla del pipeline en las cadenas donde el OCR suele romper tamanos o multipacks."
+        badges={
+          <>
+            <Badge variant="outline" className="text-[10px]">
+              regla del pipeline
+            </Badge>
+            <Badge className="border-violet-400/30 bg-violet-500/10 text-[10px] text-violet-100">
+              ambito: {activeCount} cadena{activeCount !== 1 ? "s" : ""} activa{activeCount !== 1 ? "s" : ""}
+            </Badge>
+          </>
+        }
+        kpis={[
+          { label: "Regla tecnica", value: "Correccion OCR", hint: "tamanos y multipacks" },
+          { label: "Ambito actual", value: activeCount, hint: "cadenas activadas" },
+          { label: "En alcance", value: chains.length, hint: "total configurado" },
+          { label: "Inactivas", value: chains.length - activeCount, hint: "sin aplicar regla" },
+        ]}
+        footer={
+          <div className="space-y-2.5">
+            <p className="text-xs leading-5 text-slate-300">
+              Esta configuracion no administra el catalogo de cadenas. Solo define en que cadenas se aplica la
+              correccion automatica de ruido OCR en tamanos y multipacks.
+            </p>
+            <p className="text-[11px] leading-5 text-slate-500">
+              Ejemplos tipicos: &quot;7 75ML&quot; → &quot;75ML&quot;, &quot;90 900ML&quot; → &quot;900ML&quot;,
+              &quot;85 X2&quot; → &quot;2X85G&quot; cuando hay suficiente evidencia.
+            </p>
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-sky-500/20 bg-sky-950/15 px-3 py-2.5">
+              <p className="text-[11px] leading-5 text-sky-200/90">
+                Las cadenas disponibles vienen del catalogo de cadenas. Aqui solo defines si esta regla se aplica o no a
+                cada una.
               </p>
-              <Button onClick={() => seedMutation.mutate()} className="mt-3" size="sm" variant="outline">
-                Personalizar
-              </Button>
+              {onGoToChains ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  className="h-8 shrink-0 border-sky-400/30 text-xs text-sky-100"
+                  onClick={onGoToChains}
+                >
+                  Ir a Cadenas
+                  <ArrowRight className="ml-1.5 h-3.5 w-3.5" />
+                </Button>
+              ) : null}
             </div>
-          </CardContent>
-        </Card>
-      )}
+          </div>
+        }
+      />
 
-      {data.effective_source === "custom" && data.effective?.length === 0 && (
-        <Card className="border-yellow-500/30 bg-yellow-950/20">
-          <CardContent className="pt-6 flex items-start gap-3">
-            <AlertCircle className="h-5 w-5 text-yellow-400 flex-shrink-0 mt-0.5" />
-            <div>
-              <p className="font-semibold text-yellow-200">Regla Desactivada Globalmente</p>
-              <p className="text-sm text-yellow-300 mt-1">
-                Has desactivado todas las cadenas — la regla de measure-noise está completamente apagada.
-              </p>
+      <div className="flex items-start gap-2 rounded-lg border border-amber-300/20 bg-amber-500/5 px-3 py-2.5 text-[11px] leading-5 text-amber-100/90">
+        <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-300" />
+        <p>
+          <span className="font-medium text-amber-100">Importante:</span> si una cadena no existe o esta mal resuelta
+          en el sistema, corrigela en la pestana Cadenas. Esta pantalla no reemplaza esa configuracion.
+          {onGoToChains ? (
+            <>
+              {" "}
+              <button type="button" onClick={onGoToChains} className="underline hover:text-amber-50">
+                ¿Necesitas crear o corregir una cadena? Hazlo en Cadenas.
+              </button>
+            </>
+          ) : null}
+        </p>
+      </div>
+
+      {chainsQuery.isError ? (
+        <div className="rounded-xl border border-rose-400/30 bg-rose-950/20 px-4 py-3">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="flex items-start gap-2">
+              <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-rose-300" />
+              <div>
+                <p className="text-sm font-medium text-rose-100">No se pudo cargar el alcance de la regla</p>
+                <p className="mt-1 text-xs text-rose-200/80">{loadErrorMessage}</p>
+                <p className="mt-2 font-mono text-[10px] text-rose-200/60">
+                  GET /v1/accounts/{account}/measure-noise-chains
+                </p>
+              </div>
             </div>
-          </CardContent>
-        </Card>
-      )}
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-8 border-rose-400/30 text-xs text-rose-100"
+              onClick={() => chainsQuery.refetch()}
+              disabled={chainsQuery.isFetching}
+            >
+              {chainsQuery.isFetching ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Reintentar"}
+            </Button>
+          </div>
+        </div>
+      ) : null}
 
-      {/* Form */}
-      <Card className="border-white/10 bg-white/5">
-        <CardHeader>
-          <CardTitle>Agregar Cadena</CardTitle>
-          <CardDescription>
-            Cadenas donde se aplica la limpieza de fragmentos antes de medidas
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="space-y-2">
-            <Label htmlFor="chain">Chain Code</Label>
+      <div className="rounded-xl border border-white/10 bg-white/5 px-3 py-2.5 sm:px-4">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h3 className="text-sm font-semibold text-white">Cadenas activadas</h3>
+            <p className="text-[11px] text-slate-500">Ambito por cadena — activacion de la regla, no catalogo</p>
+          </div>
+          <Button size="sm" className="h-9 gap-1.5" onClick={startActivate}>
+            <Plus className="h-3.5 w-3.5" />
+            Activar cadena
+          </Button>
+        </div>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="relative min-w-[200px] flex-1">
+          <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500" />
+          <Input
+            placeholder="Buscar chain_code o nota..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="h-9 pl-8 text-sm"
+          />
+        </div>
+        <div className="flex items-center gap-2 rounded-lg border border-white/10 bg-black/20 px-3 py-1.5">
+          <Label htmlFor="mnc-inactive" className="text-xs text-slate-300">
+            Mostrar inactivas
+          </Label>
+          <Switch id="mnc-inactive" checked={showInactive} onCheckedChange={setShowInactive} className="scale-90" />
+        </div>
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-9"
+          onClick={() => chainsQuery.refetch()}
+          disabled={chainsQuery.isFetching}
+        >
+          {chainsQuery.isFetching ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Refrescar"}
+        </Button>
+      </div>
+
+      {showForm ? (
+        <TrainingFormCard
+          title={editingChainCode ? `Editar alcance: ${editingChainCode}` : "Activar regla en una cadena"}
+          tone="violet"
+        >
+          <div className="space-y-1">
+            <Label htmlFor="mnc-chain" className="text-xs">
+              Codigo de cadena
+            </Label>
             <Input
-              id="chain"
-              placeholder="ej: santa maria, aki, supermaxi"
-              value={formData.chain_code}
-              onChange={(e) => setFormData(prev => ({ ...prev, chain_code: e.target.value }))}
-              className="bg-white/5 border-white/10"
+              id="mnc-chain"
+              className="h-9 font-mono text-sm"
+              value={chainCodeInput}
+              onChange={(e) => setChainCodeInput(e.target.value)}
+              placeholder="coral, mi comisariato, el rosado"
+              disabled={editingChainCode != null}
+              autoFocus={editingChainCode == null}
             />
-            <p className="text-xs text-white/60">
-              Ej: "ORAL B DETOX 7 75ML" → "75ML" (el 7 era fragmento del 75)
+            <p className="text-[10px] text-slate-500">
+              Debe corresponder al chain_code usado por el sistema. Se normaliza en minusculas al guardar.
             </p>
           </div>
-
-          <div className="space-y-2">
-            <Label htmlFor="notes">Notas (opcional)</Label>
+          <div className="space-y-1">
+            <Label htmlFor="mnc-notes" className="text-xs">
+              Notas
+            </Label>
             <Textarea
-              id="notes"
-              placeholder="ej: se observó el mismo patrón OCR que en Mi Comisariato"
-              value={formData.notes}
-              onChange={(e) => setFormData(prev => ({ ...prev, notes: e.target.value }))}
-              className="bg-white/5 border-white/10"
-              rows={2}
+              id="mnc-notes"
+              className="min-h-20 text-sm"
+              value={notesInput}
+              onChange={(e) => setNotesInput(e.target.value)}
+              placeholder="Ej: OCR rompe multipacks en promociones de esta cadena"
             />
           </div>
+          <div className="flex items-center justify-between rounded-lg border border-white/10 bg-black/20 px-3 py-2">
+            <Label htmlFor="mnc-active" className="text-xs">
+              Activa esta regla en esta cadena
+            </Label>
+            <Switch id="mnc-active" checked={isActiveInput} onCheckedChange={setIsActiveInput} />
+          </div>
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              className="h-8 gap-1.5"
+              onClick={() => (editingChainCode ? patchScopeMutation.mutate() : activateMutation.mutate())}
+              disabled={isSaving || (!editingChainCode && !chainCodeInput.trim())}
+            >
+              {isSaving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ShieldCheck className="h-3.5 w-3.5" />}
+              {editingChainCode ? "Guardar alcance" : "Aplicar regla"}
+            </Button>
+            <Button size="sm" variant="ghost" className="h-8" onClick={resetForm}>
+              <X className="mr-1 h-3.5 w-3.5" />
+              Cancelar
+            </Button>
+          </div>
+        </TrainingFormCard>
+      ) : null}
 
-          <Button onClick={() => upsertMutation.mutate()} disabled={upsertMutation.isPending} className="gap-2 w-full">
-            {upsertMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
-            Agregar Cadena
-          </Button>
-        </CardContent>
-      </Card>
+      <TrainingListShell
+        loading={chainsQuery.isLoading}
+        empty={!chainsQuery.isError && filteredChains.length === 0}
+        emptyMessage={
+          search.trim()
+            ? "Sin resultados para la busqueda."
+            : "Esta regla todavia no esta activada para ninguna cadena."
+        }
+        emptySubtitle={
+          search.trim() || chainsQuery.isError
+            ? undefined
+            : "Activa una cadena para aplicar la correccion automatica de ruido OCR en medidas."
+        }
+      >
+        {listContent}
+      </TrainingListShell>
 
-      {/* Effective List */}
-      <Card className="border-white/10 bg-white/5">
-        <CardHeader>
-          <CardTitle className="text-sm">
-            Cadenas Activas ({data.effective?.length || 0})
-            {data.effective_source && (
-              <Badge className="ml-2" variant={data.effective_source === "defaults" ? "outline" : "secondary"}>
-                {data.effective_source === "defaults" ? "Defaults" : "Personalizadas"}
-              </Badge>
-            )}
-          </CardTitle>
-          <CardDescription>
-            La regla de measure-noise se aplica SOLO a estas cadenas
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          {!data.effective?.length ? (
-            <div className="text-center text-white/60 py-6">
-              {data.effective_source === "custom"
-                ? "Todas las cadenas desactivadas"
-                : "Se están usando los defaults"}
-            </div>
-          ) : (
-            <div className="flex flex-wrap gap-2">
-              {data.effective.map((chain: string) => (
-                <Badge key={chain} className="bg-green-900 text-green-100 text-xs">
-                  {chain}
-                </Badge>
-              ))}
-            </div>
-          )}
-        </CardContent>
-      </Card>
-
-      {/* Custom Chains */}
-      {data.custom?.length > 0 && (
-        <Card className="border-white/10 bg-white/5">
-          <CardHeader>
-            <CardTitle className="text-sm">Cadenas Personalizadas ({data.custom.length})</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-2">
-            {data.custom.map((chain: any) => (
-              <div key={chain.id} className="flex items-center justify-between rounded border border-white/10 bg-white/3 p-3">
-                <div className="flex-1">
-                  <p className="font-mono font-semibold text-sm">{chain.chain_code}</p>
-                  {chain.notes && <p className="text-xs text-blue-300 mt-1">📝 {chain.notes}</p>}
-                </div>
-                <div className="flex gap-2">
-                  <Button
-                    onClick={() => toggleMutation.mutate(chain.id, chain.is_active)}
-                    variant="outline"
-                    size="sm"
-                    className="text-xs"
-                  >
-                    {chain.is_active ? "Desactivar" : "Activar"}
-                  </Button>
-                  <Button
-                    onClick={() => deleteMutation.mutate(chain.id)}
-                    variant="destructive"
-                    size="sm"
-                  >
-                    <Trash2 className="h-3 w-3" />
-                  </Button>
-                </div>
-              </div>
-            ))}
-          </CardContent>
-        </Card>
-      )}
-
-      {/* Defaults Reference */}
-      {data.defaults?.length > 0 && (
-        <Card className="border-white/10 bg-white/5">
-          <CardHeader>
-            <CardTitle className="text-sm">Cadenas Históricas por Defecto</CardTitle>
-            <CardDescription>Si estás personalizado, puedes usarlas como referencia</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <div className="flex flex-wrap gap-2">
-              {data.defaults.map((chain: string) => (
-                <Badge key={chain} variant="outline" className="text-xs">
-                  {chain}
-                </Badge>
-              ))}
-            </div>
-          </CardContent>
-        </Card>
-      )}
-
-      <div className="rounded border border-blue-500/30 bg-blue-950/20 p-3 text-sm text-blue-200">
-        <p className="font-semibold">ℹ️ Nota:</p>
-        <p>Los cambios se aplican al próximo job creado. No afectan jobs en curso.</p>
-      </div>
+      <TrainingFooterNote>
+        Los cambios se aplican al proximo job de promociones creado. No afectan jobs en curso. No edita aliases,
+        frases ignoradas ni el catalogo de cadenas.
+      </TrainingFooterNote>
     </div>
   );
 }

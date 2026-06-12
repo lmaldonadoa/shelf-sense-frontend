@@ -2,13 +2,19 @@
 
 import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Edit2, Loader2, Plus, Search, ShieldCheck, Trash2, X } from "lucide-react";
+import { Edit2, Loader2, Plus, Search, ShieldCheck, Trash2, Type, X } from "lucide-react";
 import { toast } from "sonner";
 import { HttpError, ocrApi } from "@/lib/ocrApi";
 import type { AccountIgnoredPhrase } from "@/types/ocr-api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+
+import {
+  TrainingFooterNote,
+  TrainingFormCard,
+  TrainingListShell,
+  TrainingSectionHero,
+} from "@/components/training/training-ui";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
@@ -163,29 +169,32 @@ export function NameNoisePage({ account }: Props) {
 
   const isSaving = createMutation.isPending || patchMutation.isPending;
 
+  const activeCount = phrases.filter((p) => p.is_active === 1 || p.is_active === true).length;
+
   return (
     <div className="space-y-4">
-      {/* Header */}
-      <Card className="border-white/10 bg-white/5">
-        <CardHeader className="gap-1 px-4 py-3 sm:px-5">
-          <div className="flex items-start justify-between gap-3">
-            <div>
-              <CardTitle className="text-base">Ruido de nombres</CardTitle>
-              <CardDescription className="mt-1 text-xs leading-5">
-                Gestiona frases de banner, cadena o promocion que no deben contaminar el nombre humanizado del producto en promociones.
-                <br />
-                <span className="text-slate-500">Ejemplos: CORAL, INTERMERCADOS, TARJETA Y MAS BELLO, MINIMERCADOS.</span>
-              </CardDescription>
-            </div>
-            <div className="flex items-center gap-2">
-              <Badge variant="outline" className="text-[10px]">scope: name</Badge>
-              <Badge className="border-emerald-400/30 bg-emerald-500/10 text-[10px] text-emerald-200">
-                {phrases.length} frase{phrases.length !== 1 ? "s" : ""}
-              </Badge>
-            </div>
-          </div>
-        </CardHeader>
-      </Card>
+      <TrainingSectionHero
+        tone="emerald"
+        icon={<Type className="h-4 w-4" />}
+        title="Ruido de nombres"
+        description="Frases de banner, cadena o promocion que no deben contaminar el nombre humanizado. Ej: CORAL, INTERMERCADOS, MINIMERCADOS."
+        badges={
+          <>
+            <Badge variant="outline" className="text-[10px]">
+              scope: name
+            </Badge>
+            <Badge className="border-emerald-400/30 bg-emerald-500/10 text-[10px] text-emerald-200">
+              {phrases.length} frase{phrases.length !== 1 ? "s" : ""}
+            </Badge>
+          </>
+        }
+        kpis={[
+          { label: "Total", value: phrases.length },
+          { label: "Activas", value: activeCount },
+          { label: "Globales", value: phrases.filter((p) => p.chain_whitelist.length === 0).length },
+          { label: "Por cadena", value: phrases.filter((p) => p.chain_whitelist.length > 0).length },
+        ]}
+      />
 
       {/* Toolbar: search + create */}
       <div className="flex flex-wrap items-center gap-2">
@@ -208,14 +217,8 @@ export function NameNoisePage({ account }: Props) {
       </div>
 
       {/* Create / Edit form */}
-      {showForm && (
-        <Card className="border-amber-300/20 bg-amber-500/5">
-          <CardHeader className="gap-1 px-4 py-3 sm:px-5">
-            <CardTitle className="text-sm">
-              {editingId != null ? `Editar frase #${editingId}` : "Nueva frase de ruido"}
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-3 px-4 pb-4 sm:px-5">
+      {showForm ? (
+        <TrainingFormCard title={editingId != null ? `Editar frase #${editingId}` : "Nueva frase de ruido"} tone="emerald">
             <div className="space-y-1">
               <Label htmlFor="nn-phrase" className="text-xs">Frase</Label>
               <Input
@@ -259,28 +262,19 @@ export function NameNoisePage({ account }: Props) {
                 Cancelar
               </Button>
             </div>
-          </CardContent>
-        </Card>
-      )}
+        </TrainingFormCard>
+      ) : null}
 
-      {/* List */}
-      <Card className="border-white/10 bg-white/5">
-        <CardContent className="px-0 pb-0">
-          {phrasesQuery.isLoading ? (
-            <div className="flex items-center justify-center gap-2 py-12 text-sm text-slate-400">
-              <Loader2 className="h-4 w-4 animate-spin" />
-              Cargando frases de ruido...
-            </div>
-          ) : filteredPhrases.length === 0 ? (
-            <div className="py-12 text-center text-sm text-slate-400">
-              {search.trim()
-                ? "Sin resultados para la busqueda."
-                : "No hay frases de ruido configuradas. Agrega una para comenzar."}
-            </div>
-          ) : (
-            <div className="max-h-[min(60vh,600px)] overflow-y-auto">
-              {/* Table header */}
-              <div className="sticky top-0 z-10 grid grid-cols-[1fr_auto_auto_auto_auto] items-center gap-2 border-b border-white/10 bg-slate-950/90 px-4 py-2 text-[10px] uppercase tracking-wide text-slate-500 backdrop-blur">
+      <TrainingListShell
+        loading={phrasesQuery.isLoading}
+        empty={filteredPhrases.length === 0}
+        emptyMessage={
+          search.trim()
+            ? "Sin resultados para la busqueda."
+            : "No hay frases de ruido configuradas. Agrega una para comenzar."
+        }
+      >
+        <div className="sticky top-0 z-10 grid grid-cols-[1fr_auto_auto_auto_auto] items-center gap-2 border-b border-white/10 bg-slate-950/90 px-4 py-2 text-[10px] uppercase tracking-wide text-slate-500 backdrop-blur">
                 <span>Frase</span>
                 <span className="w-24 text-center">Cadenas</span>
                 <span className="w-16 text-center">Activa</span>
@@ -344,11 +338,8 @@ export function NameNoisePage({ account }: Props) {
                     </div>
                   );
                 })}
-              </div>
-            </div>
-          )}
-        </CardContent>
-      </Card>
+        </div>
+      </TrainingListShell>
 
       {/* Seed info (debug) */}
       {seedInfo && (
@@ -360,10 +351,10 @@ export function NameNoisePage({ account }: Props) {
         </details>
       )}
 
-      <div className="rounded-lg border border-sky-500/20 bg-sky-950/15 px-3 py-2.5 text-[11px] leading-5 text-sky-200/80">
+      <TrainingFooterNote>
         Los cambios se aplican al proximo job creado. No afectan jobs en curso.
         Estas frases se usan para limpiar ruido del nombre final del producto en el pipeline de promociones.
-      </div>
+      </TrainingFooterNote>
     </div>
   );
 }

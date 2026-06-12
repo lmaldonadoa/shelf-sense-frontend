@@ -2,14 +2,19 @@
 
 import { useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { Plus, Trash2, Loader2, Save, ChevronDown, ChevronUp } from "lucide-react";
+import { ChevronDown, ChevronUp, Loader2, Palette, RefreshCw, Save, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
+import {
+  TrainingFooterNote,
+  TrainingFormCard,
+  TrainingPanelCard,
+  TrainingSectionHero,
+} from "@/components/training/training-ui";
 
 type Props = { account: string };
 
@@ -149,14 +154,38 @@ export function PromotionVariantsEditor({ account }: Props) {
   const data = variantsQuery.data || { defaults: [], custom: [], effective: [] };
 
   return (
-    <div className="space-y-6">
-      {/* Form */}
-      <Card className="border-white/10 bg-white/5">
-        <CardHeader>
-          <CardTitle>Agregar/Editar Variante</CardTitle>
-          <CardDescription>Fragancias, sabores o variantes de producto</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
+    <div className="space-y-4">
+      <TrainingSectionHero
+        tone="violet"
+        icon={<Palette className="h-4 w-4" />}
+        title="Variantes de promocion"
+        description="Fragancias, sabores y variantes de producto detectadas desde texto OCR de soporte."
+        badges={
+          <Badge variant="outline" className="border-violet-400/30 text-[10px] text-violet-100">
+            promotions
+          </Badge>
+        }
+        kpis={[
+          { label: "Defaults", value: data.defaults?.length ?? 0 },
+          { label: "Custom", value: data.custom?.length ?? 0 },
+          { label: "Efectivas", value: data.effective?.length ?? 0 },
+          { label: "Con terms", value: data.custom?.filter((v: { terms?: string[] }) => (v.terms?.length ?? 0) > 0).length ?? 0 },
+        ]}
+      />
+
+      <div className="flex flex-wrap items-center gap-2">
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-9"
+          onClick={() => variantsQuery.refetch()}
+          disabled={variantsQuery.isFetching}
+        >
+          {variantsQuery.isFetching ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+        </Button>
+      </div>
+
+      <TrainingFormCard title="Nueva variante" tone="violet">
           <div className="space-y-2">
             <Label htmlFor="canonical">Canonical (OBLIGATORIO)</Label>
             <Input
@@ -296,74 +325,72 @@ export function PromotionVariantsEditor({ account }: Props) {
             />
           </div>
 
-          <Button onClick={() => upsertMutation.mutate()} disabled={upsertMutation.isPending} className="gap-2 w-full">
-            {upsertMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
-            Guardar Variante
-          </Button>
-        </CardContent>
-      </Card>
+        <Button size="sm" className="h-8 w-full gap-1.5" onClick={() => upsertMutation.mutate()} disabled={upsertMutation.isPending}>
+          {upsertMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
+          Guardar variante
+        </Button>
+      </TrainingFormCard>
 
-      {/* Defaults */}
-      {data.defaults?.length > 0 && (
-        <Card className="border-white/10 bg-white/5">
-          <CardHeader
-            className="cursor-pointer"
-            onClick={() => setExpandedDefaults(!expandedDefaults)}
-          >
-            <CardTitle className="text-sm flex items-center justify-between">
-              <span>Variantes por Defecto ({data.defaults.length})</span>
+      {data.defaults?.length > 0 ? (
+        <TrainingPanelCard
+          title={`Defaults del sistema (${data.defaults.length})`}
+          action={
+            <button type="button" onClick={() => setExpandedDefaults(!expandedDefaults)} className="text-slate-400">
               {expandedDefaults ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
-            </CardTitle>
-          </CardHeader>
-          {expandedDefaults && (
-            <CardContent className="space-y-2">
-              {data.defaults.map((v: any) => (
-                <div key={v.canonical} className="rounded border border-white/10 bg-white/3 p-2 text-sm">
-                  <p className="font-mono font-semibold">{v.canonical}</p>
-                  {v.terms?.length > 0 && <p className="text-xs text-white/60">Terms: {v.terms.join(", ")}</p>}
-                  {v.fallback_prefixes?.length > 0 && <p className="text-xs text-white/60">Prefixes: {v.fallback_prefixes.join(", ")}</p>}
-                  {v.compound_terms?.length > 0 && <p className="text-xs text-white/60">Compound: {v.compound_terms.join(", ")}</p>}
+            </button>
+          }
+        >
+          {expandedDefaults ? (
+            <div className="max-h-[min(40vh,360px)] space-y-2 overflow-y-auto">
+              {data.defaults.map((v: PromotionVariant) => (
+                <div key={v.canonical} className="rounded-lg border border-white/10 bg-black/20 px-3 py-2">
+                  <p className="font-mono text-xs font-semibold text-violet-100">{v.canonical}</p>
+                  {v.terms?.length ? <p className="mt-1 text-[10px] text-slate-500">Terms: {v.terms.join(", ")}</p> : null}
+                  {v.fallback_prefixes?.length ? (
+                    <p className="text-[10px] text-slate-500">Prefixes: {v.fallback_prefixes.join(", ")}</p>
+                  ) : null}
                 </div>
               ))}
-            </CardContent>
+            </div>
+          ) : (
+            <p className="text-[11px] text-slate-500">Click para expandir {data.defaults.length} variantes de sistema.</p>
           )}
-        </Card>
-      )}
+        </TrainingPanelCard>
+      ) : null}
 
-      {/* Custom */}
-      {data.custom?.length > 0 && (
-        <Card className="border-white/10 bg-white/5">
-          <CardHeader>
-            <CardTitle className="text-sm">Variantes Personalizadas ({data.custom.length})</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-2">
-            {data.custom.map((v: any) => (
-              <div key={v.id} className="flex items-start justify-between rounded border border-white/10 bg-white/3 p-3">
-                <div className="flex-1">
-                  <p className="font-mono font-semibold">{v.canonical}</p>
-                  {v.terms?.length > 0 && <p className="text-xs text-white/60">Terms: {v.terms.join(", ")}</p>}
-                  {v.fallback_prefixes?.length > 0 && <p className="text-xs text-white/60">Prefixes: {v.fallback_prefixes.join(", ")}</p>}
-                  {v.compound_terms?.length > 0 && <p className="text-xs text-white/60">Compound: {v.compound_terms.join(", ")}</p>}
-                  {v.chain_whitelist?.length > 0 && <p className="text-xs text-white/60">Cadenas: {v.chain_whitelist.join(", ")}</p>}
-                  {v.notes && <p className="text-xs text-blue-300 mt-1">📝 {v.notes}</p>}
+      {data.custom?.length > 0 ? (
+        <TrainingPanelCard title={`Variantes personalizadas (${data.custom.length})`}>
+          <div className="max-h-[min(50vh,480px)] space-y-2 overflow-y-auto">
+            {data.custom.map((v: PromotionVariant & { id: number }) => (
+              <div key={v.id} className="flex items-start justify-between gap-2 rounded-lg border border-white/10 bg-black/20 px-3 py-2.5">
+                <div className="min-w-0 flex-1">
+                  <p className="font-mono text-xs font-semibold text-white">{v.canonical}</p>
+                  {v.terms?.length ? <p className="mt-1 text-[10px] text-slate-500">Terms: {v.terms.join(", ")}</p> : null}
+                  {v.fallback_prefixes?.length ? (
+                    <p className="text-[10px] text-slate-500">Prefixes: {v.fallback_prefixes.join(", ")}</p>
+                  ) : null}
+                  {v.compound_terms?.length ? (
+                    <p className="text-[10px] text-slate-500">Compound: {v.compound_terms.join(", ")}</p>
+                  ) : null}
+                  {v.notes ? <p className="mt-1 text-[10px] text-violet-300">{v.notes}</p> : null}
                 </div>
                 <Button
                   onClick={() => v.id && deleteMutation.mutate(v.id)}
-                  variant="destructive"
+                  variant="ghost"
                   size="sm"
+                  className="h-7 w-7 shrink-0 p-0 text-rose-400 hover:text-rose-300"
                 >
-                  <Trash2 className="h-3 w-3" />
+                  <Trash2 className="h-3.5 w-3.5" />
                 </Button>
               </div>
             ))}
-          </CardContent>
-        </Card>
-      )}
+          </div>
+        </TrainingPanelCard>
+      ) : null}
 
-      <div className="rounded border border-blue-500/30 bg-blue-950/20 p-3 text-sm text-blue-200">
-        <p className="font-semibold">ℹ️ Nota:</p>
-        <p>Los cambios se aplican al próximo job creado. No afectan jobs en curso.</p>
-      </div>
+      <TrainingFooterNote>
+        Los cambios se aplican al proximo job creado. No afectan jobs en curso.
+      </TrainingFooterNote>
     </div>
   );
 }

@@ -9,9 +9,10 @@ type AliasesTableProps = {
   aliases: AliasRow[];
   onEdit: (alias: AliasRow) => void;
   onToggle: (alias: AliasRow) => void;
+  onDeactivate?: (alias: AliasRow) => void;
 };
 
-export function AliasesTable({ aliases, onEdit, onToggle }: AliasesTableProps) {
+export function AliasesTable({ aliases, onEdit, onToggle, onDeactivate }: AliasesTableProps) {
   if (!aliases.length) return <p className="text-sm text-muted-foreground">No hay aliases para mostrar.</p>;
 
   return (
@@ -65,9 +66,12 @@ export function AliasesTable({ aliases, onEdit, onToggle }: AliasesTableProps) {
               </TableCell>
               <TableCell><Badge variant={active ? "default" : "secondary"}>{active ? "Activo" : "Inactivo"}</Badge></TableCell>
               <TableCell>{row.updated_at ?? "-"}</TableCell>
-              <TableCell className="space-x-2">
+              <TableCell className="space-x-2 whitespace-nowrap">
                 <Button size="sm" variant="outline" onClick={() => onEdit(row)}>Editar</Button>
                 <Button size="sm" variant="ghost" onClick={() => onToggle(row)}>{active ? "Desactivar" : "Activar"}</Button>
+                {active && onDeactivate ? (
+                  <Button size="sm" variant="ghost" className="text-rose-300" onClick={() => onDeactivate(row)}>Eliminar</Button>
+                ) : null}
               </TableCell>
             </TableRow>
           );

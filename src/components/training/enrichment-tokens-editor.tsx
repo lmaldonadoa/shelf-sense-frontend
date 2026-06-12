@@ -2,14 +2,19 @@
 
 import { useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { Plus, Trash2, Loader2, Save, Info } from "lucide-react";
+import { Coins, Info, Loader2, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
-import { Separator } from "@/components/ui/separator";
+import { Switch } from "@/components/ui/switch";
+import {
+  TrainingFooterNote,
+  TrainingFormCard,
+  TrainingPanelCard,
+  TrainingSectionHero,
+  TrainingTypePill,
+} from "@/components/training/training-ui";
 
 type Props = { account: string };
 
@@ -110,7 +115,7 @@ export function EnrichmentTokensEditor({ account }: Props) {
   });
 
   const toggleMutation = useMutation({
-    mutationFn: async (tokenId: number, isActive: boolean) => {
+    mutationFn: async ({ tokenId, isActive }: { tokenId: number; isActive: boolean }) => {
       const response = await fetch(
         `/admin/ocr/proxy/v1/accounts/${encodeURIComponent(accountName)}/enrichment-tokens/${selectedListType}/${tokenId}`,
         {
@@ -133,144 +138,136 @@ export function EnrichmentTokensEditor({ account }: Props) {
   const data = tokensQuery.data || { defaults: [], custom: [], effective: [] };
 
   return (
-    <div className="space-y-6">
-      {/* List Type Selector */}
-      <Card className="border-white/10 bg-white/5">
-        <CardHeader>
-          <CardTitle className="text-sm">Seleccionar Tipo de Token</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="grid grid-cols-2 gap-3 md:grid-cols-3">
+    <div className="space-y-4">
+      <TrainingSectionHero
+        tone="emerald"
+        icon={<Coins className="h-4 w-4" />}
+        title="Tokens de enriquecimiento"
+        description={LIST_TYPE_LABELS[selectedListType].description}
+        badges={
+          <Badge variant="outline" className="border-emerald-400/30 text-[10px] text-emerald-100">
+            {LIST_TYPE_LABELS[selectedListType].label}
+          </Badge>
+        }
+        kpis={[
+          { label: "Defaults", value: data.defaults?.length ?? 0, hint: "sistema" },
+          { label: "Custom", value: data.custom?.length ?? 0, hint: "editables" },
+          { label: "Efectivos", value: data.effective?.length ?? 0, hint: "pipeline" },
+          { label: "Activos custom", value: data.custom?.filter((i: { is_active?: boolean }) => i.is_active).length ?? 0 },
+        ]}
+        footer={
+          <div className="grid grid-cols-2 gap-2 md:grid-cols-3">
             {(Object.keys(LIST_TYPE_LABELS) as ListType[]).map((type) => (
-              <button
+              <TrainingTypePill
                 key={type}
+                active={selectedListType === type}
+                label={LIST_TYPE_LABELS[type].label}
+                description={LIST_TYPE_LABELS[type].description.split(".")[0]}
                 onClick={() => setSelectedListType(type)}
-                className={`rounded border-2 p-3 text-left text-sm transition-all ${
-                  selectedListType === type
-                    ? "border-blue-400 bg-blue-950/30 text-white"
-                    : "border-white/10 bg-white/3 text-white/70 hover:bg-white/5"
-                }`}
-              >
-                <p className="font-semibold">{LIST_TYPE_LABELS[type].label}</p>
-                <p className="text-xs text-white/60 mt-1">{LIST_TYPE_LABELS[type].description}</p>
-              </button>
+                tone="emerald"
+              />
             ))}
           </div>
-        </CardContent>
-      </Card>
+        }
+      />
 
-      {/* Add Token Form */}
-      <Card className="border-white/10 bg-white/5">
-        <CardHeader>
-          <CardTitle className="text-sm">Agregar Token</CardTitle>
-          <CardDescription>{LIST_TYPE_LABELS[selectedListType].description}</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <div className="flex gap-2">
-            <Input
-              placeholder="ej: DEJA, ANTIBACTERIAL, PROMO"
-              value={tokenInput}
-              onChange={(e) => setTokenInput(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && upsertMutation.mutate(tokenInput)}
-              className="bg-white/5 border-white/10"
-            />
-            <Button
-              onClick={() => upsertMutation.mutate(tokenInput)}
-              disabled={upsertMutation.isPending || !tokenInput.trim()}
-              className="gap-2"
-            >
-              {upsertMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
-              Agregar
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
+      <div className="flex flex-wrap items-center gap-2">
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-9"
+          onClick={() => tokensQuery.refetch()}
+          disabled={tokensQuery.isFetching}
+        >
+          {tokensQuery.isFetching ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+        </Button>
+      </div>
 
-      {/* Defaults Section */}
-      {data.defaults?.length > 0 && (
-        <Card className="border-white/10 bg-white/5">
-          <CardHeader>
-            <CardTitle className="text-sm flex items-center gap-2">
-              Tokens por Defecto ({data.defaults.length})
-              <Badge variant="outline">Sistema</Badge>
-            </CardTitle>
-            <CardDescription>Solo lectura - vienen del código</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <div className="flex flex-wrap gap-2">
-              {data.defaults.map((token: string) => (
-                <Badge key={token} variant="outline" className="text-xs">
-                  {token}
-                </Badge>
-              ))}
-            </div>
-          </CardContent>
-        </Card>
-      )}
+      <TrainingFormCard title={`Agregar token — ${LIST_TYPE_LABELS[selectedListType].label}`} tone="emerald">
+        <div className="flex gap-2">
+          <Input
+            placeholder="ej: DEJA, ANTIBACTERIAL, PROMO"
+            value={tokenInput}
+            onChange={(e) => setTokenInput(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && upsertMutation.mutate(tokenInput)}
+            className="h-9 font-mono text-sm"
+          />
+          <Button
+            size="sm"
+            className="h-9 gap-1.5"
+            onClick={() => upsertMutation.mutate(tokenInput)}
+            disabled={upsertMutation.isPending || !tokenInput.trim()}
+          >
+            {upsertMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
+            Agregar
+          </Button>
+        </div>
+      </TrainingFormCard>
 
-      {/* Custom Tokens */}
-      {data.custom?.length > 0 && (
-        <Card className="border-white/10 bg-white/5">
-          <CardHeader>
-            <CardTitle className="text-sm">Tokens Personalizados ({data.custom.length})</CardTitle>
-            <CardDescription>Puedes editar o eliminar estos tokens</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-2">
-            {data.custom.map((item: any) => (
-              <div key={item.id} className="flex items-center justify-between rounded border border-white/10 bg-white/3 p-3">
-                <div className="flex items-center gap-3 flex-1">
-                  <Badge className={item.is_active ? "bg-green-900" : "bg-gray-700"}>
-                    {item.token}
-                  </Badge>
-                  <span className="text-xs text-white/60">{item.created_at?.split("T")[0]}</span>
-                </div>
-                <div className="flex gap-2">
-                  <Button
-                    onClick={() => toggleMutation.mutate(item.id, item.is_active)}
-                    variant="outline"
-                    size="sm"
-                    className="text-xs"
-                  >
-                    {item.is_active ? "Desactivar" : "Activar"}
-                  </Button>
-                  <Button
-                    onClick={() => deleteMutation.mutate(item.id)}
-                    variant="destructive"
-                    size="sm"
-                  >
-                    <Trash2 className="h-3 w-3" />
-                  </Button>
-                </div>
-              </div>
-            ))}
-          </CardContent>
-        </Card>
-      )}
-
-      {/* Effective Tokens */}
-      <Card className="border-white/10 bg-white/5">
-        <CardHeader>
-          <CardTitle className="text-sm flex items-center gap-2">
-            <Info className="h-4 w-4" />
-            Tokens Efectivos (Totales: {data.effective?.length || 0})
-          </CardTitle>
-          <CardDescription>Esto es lo que realmente usa el pipeline</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="flex flex-wrap gap-2">
-            {data.effective?.map((token: string) => (
-              <Badge key={token} variant="secondary" className="text-xs">
+      {data.defaults?.length > 0 ? (
+        <TrainingPanelCard title={`Defaults del sistema (${data.defaults.length})`} description="Solo lectura — vienen del codigo">
+          <div className="flex max-h-32 flex-wrap gap-1.5 overflow-y-auto">
+            {data.defaults.map((token: string) => (
+              <Badge key={token} variant="outline" className="h-5 text-[10px] font-mono">
                 {token}
               </Badge>
             ))}
           </div>
-        </CardContent>
-      </Card>
+        </TrainingPanelCard>
+      ) : null}
 
-      <div className="rounded border border-blue-500/30 bg-blue-950/20 p-3 text-sm text-blue-200">
-        <p className="font-semibold">ℹ️ Nota:</p>
-        <p>Los cambios se aplican al próximo job creado. No afectan jobs en curso.</p>
-      </div>
+      {data.custom?.length > 0 ? (
+        <TrainingPanelCard title={`Tokens personalizados (${data.custom.length})`} description="Activa o elimina tokens custom">
+          <div className="max-h-[min(40vh,360px)] space-y-1 divide-y divide-white/5 overflow-y-auto">
+            {data.custom.map((item: { id: number; token: string; is_active?: boolean; created_at?: string }) => (
+              <div key={item.id} className="flex items-center justify-between gap-2 py-2 first:pt-0">
+                <div className="flex min-w-0 items-center gap-2">
+                  <Badge
+                    variant="outline"
+                    className={`h-5 font-mono text-[10px] ${item.is_active ? "border-emerald-400/30 text-emerald-100" : "opacity-50"}`}
+                  >
+                    {item.token}
+                  </Badge>
+                  <span className="text-[10px] text-slate-500">{item.created_at?.split("T")[0]}</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Switch
+                    checked={!!item.is_active}
+                    onCheckedChange={() => toggleMutation.mutate({ tokenId: item.id, isActive: !!item.is_active })}
+                    className="scale-75"
+                  />
+                  <Button
+                    onClick={() => deleteMutation.mutate(item.id)}
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 w-7 p-0 text-rose-400 hover:text-rose-300"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </TrainingPanelCard>
+      ) : null}
+
+      <TrainingPanelCard
+        title={`Tokens efectivos (${data.effective?.length ?? 0})`}
+        description="Union de defaults + custom activos — lo que usa el pipeline"
+        action={<Info className="h-4 w-4 text-slate-500" />}
+      >
+        <div className="flex max-h-40 flex-wrap gap-1.5 overflow-y-auto">
+          {data.effective?.map((token: string) => (
+            <Badge key={token} variant="secondary" className="h-5 text-[10px] font-mono">
+              {token}
+            </Badge>
+          ))}
+        </div>
+      </TrainingPanelCard>
+
+      <TrainingFooterNote>
+        Los cambios se aplican al proximo job creado. No afectan jobs en curso.
+      </TrainingFooterNote>
     </div>
   );
 }

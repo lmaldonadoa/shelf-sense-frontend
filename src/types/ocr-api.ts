@@ -103,8 +103,22 @@ export type TextEnrichmentConfig = {
   [key: string]: unknown;
 };
 
+export type GlmOcrConfig = {
+  model?: string;
+  num_ctx?: number;
+  num_predict?: number;
+  temperature?: number;
+  keep_alive?: string;
+  prompt_file?: string;
+  chain_prompt_files?: Record<string, string>;
+  [key: string]: unknown;
+};
+
 export type QwenVlConfig = {
   model?: string;
+  num_ctx?: number;
+  num_predict?: number;
+  keep_alive?: string;
   prompt_file?: string;
   enabled_sources?: string[];
   timeout_sec?: number;
@@ -174,6 +188,7 @@ export type PipelineConfig = {
   detection_config?: DetectionConfig;
   support_labels?: SupportLabelsConfig;
   text_enrichment?: TextEnrichmentConfig;
+  glm_ocr?: GlmOcrConfig;
   qwen_vl?: QwenVlConfig;
   ocr_preprocess?: OcrPreprocessConfig;
   [key: string]: unknown;
@@ -1805,6 +1820,31 @@ export type AccountIgnoredPhrasesResponse = {
   account_name: string;
   ignored_phrases: AccountIgnoredPhrase[];
   name_noise_seed_info?: NameNoiseSeedInfo | null;
+};
+
+export type MeasureNoiseChain = {
+  id: number;
+  chain_code: string;
+  is_active: number | boolean;
+  notes?: string | null;
+  created_at?: string;
+  updated_at?: string;
+};
+
+export type MeasureNoiseChainsResponse = {
+  account_name: string;
+  measure_noise_chains: MeasureNoiseChain[];
+};
+
+export type MeasureNoiseChainUpsertRequest = {
+  chain_code: string;
+  is_active?: boolean;
+  notes?: string;
+};
+
+export type MeasureNoiseChainPatchRequest = {
+  is_active?: boolean;
+  notes?: string;
 };
 
 // ── Job ignored-phrase suggestions (noise review) ──────────────

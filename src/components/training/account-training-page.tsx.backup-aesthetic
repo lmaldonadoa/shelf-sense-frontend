@@ -1,0 +1,165 @@
+"use client";
+
+import { useState } from "react";
+import { AccountAliasesPage } from "@/components/semantic/account-aliases-page";
+import { AccountChainsPage } from "@/components/semantic/account-chains-page";
+import { AccountSemanticKnowledgePage } from "@/components/semantic/account-semantic-knowledge-page";
+import { AccountSemanticLabPage } from "@/components/semantic/account-semantic-lab-page";
+import { AccountSemanticReviewPage } from "@/components/semantic/account-semantic-review-page";
+import { SemanticConfigPage } from "@/components/training/semantic-config-page";
+import { SizeRulesPage } from "@/components/training/size-rules-page";
+import { RagEffectivenessPage } from "@/components/training/rag-effectiveness-page";
+import { SemanticAliasesEditor } from "@/components/training/semantic-aliases-editor";
+import { IgnoredPhrasesEditor } from "@/components/training/ignored-phrases-editor";
+import { EnrichmentTokensEditor } from "@/components/training/enrichment-tokens-editor";
+import { PromotionVariantsEditor } from "@/components/training/promotion-variants-editor";
+import { CategoryMarkersEditor } from "@/components/training/category-markers-editor";
+import { MeasureNoiseChainsEditor } from "@/components/training/measure-noise-chains-editor";
+import { NameNoisePage } from "@/components/training/name-noise-page";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+
+type Props = { account: string };
+type TrainingTab =
+  | "chains"
+  | "aliases"
+  | "knowledge"
+  | "lab"
+  | "curaduria"
+  | "semantic-config"
+  | "size-rules"
+  | "rag-effectiveness"
+  | "semantic-aliases"
+  | "ignored-phrases"
+  | "enrichment-tokens"
+  | "variants"
+  | "markers"
+  | "measure-noise-chains"
+  | "name-noise";
+
+export function AccountTrainingPage({ account }: Props) {
+  const [tab, setTab] = useState<TrainingTab>("chains");
+
+  const promotionsTabs: TrainingTab[] = ["variants", "markers", "measure-noise-chains"];
+  const semanticEnrichmentTabs: TrainingTab[] = ["semantic-aliases", "ignored-phrases", "name-noise", "enrichment-tokens"];
+  const semanticConfigTabs: TrainingTab[] = ["semantic-config", "size-rules", "rag-effectiveness"];
+  const curduriaTabs: TrainingTab[] = ["lab", "curaduria"];
+
+  return (
+    <div className="space-y-4">
+      <Card className="border-white/10 bg-white/5">
+        <CardHeader>
+          <CardTitle>Entrenamiento IA</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="flex flex-wrap gap-2">
+            <Button variant={tab === "chains" ? "default" : "outline"} onClick={() => setTab("chains")}>
+              Cadenas
+            </Button>
+            <Button
+              variant={promotionsTabs.includes(tab) ? "default" : "outline"}
+              onClick={() => setTab("measure-noise-chains")}
+              className="text-sm"
+            >
+              Promociones
+            </Button>
+            <Button
+              variant={semanticEnrichmentTabs.includes(tab) ? "default" : "outline"}
+              onClick={() => setTab("semantic-aliases")}
+              className="text-sm"
+            >
+              Enriquecimiento Semantico
+            </Button>
+            <Button
+              variant={semanticConfigTabs.includes(tab) ? "default" : "outline"}
+              onClick={() => setTab("semantic-config")}
+              className="text-sm"
+            >
+              Configuracion Semantica
+            </Button>
+            <Button variant={curduriaTabs.includes(tab) ? "default" : "outline"} onClick={() => setTab("lab")}>
+              Curaduria
+            </Button>
+          </div>
+
+          {promotionsTabs.includes(tab) && (
+            <div className="flex flex-wrap gap-2 border-t border-white/10 pt-3">
+              <Button variant={tab === "variants" ? "default" : "outline"} size="sm" onClick={() => setTab("variants")}>
+                Variantes
+              </Button>
+              <Button variant={tab === "markers" ? "default" : "outline"} size="sm" onClick={() => setTab("markers")}>
+                Markers
+              </Button>
+              <Button
+                variant={tab === "measure-noise-chains" ? "default" : "outline"}
+                size="sm"
+                onClick={() => setTab("measure-noise-chains")}
+              >
+                Ruido de medidas por cadena
+              </Button>
+            </div>
+          )}
+
+          {semanticEnrichmentTabs.includes(tab) && (
+            <div className="flex flex-wrap gap-2 border-t border-white/10 pt-3">
+              <Button variant={tab === "semantic-aliases" ? "default" : "outline"} size="sm" onClick={() => setTab("semantic-aliases")}>
+                Aliases
+              </Button>
+              <Button variant={tab === "ignored-phrases" ? "default" : "outline"} size="sm" onClick={() => setTab("ignored-phrases")}>
+                Frases Ignoradas
+              </Button>
+              <Button variant={tab === "name-noise" ? "default" : "outline"} size="sm" onClick={() => setTab("name-noise")}>
+                Ruido de Nombres
+              </Button>
+              <Button variant={tab === "enrichment-tokens" ? "default" : "outline"} size="sm" onClick={() => setTab("enrichment-tokens")}>
+                Tokens
+              </Button>
+            </div>
+          )}
+
+          {semanticConfigTabs.includes(tab) && (
+            <div className="flex flex-wrap gap-2 border-t border-white/10 pt-3">
+              <Button variant={tab === "semantic-config" ? "default" : "outline"} size="sm" onClick={() => setTab("semantic-config")}>
+                Configuracion
+              </Button>
+              <Button variant={tab === "size-rules" ? "default" : "outline"} size="sm" onClick={() => setTab("size-rules")}>
+                Reglas Tamano
+              </Button>
+              <Button variant={tab === "rag-effectiveness" ? "default" : "outline"} size="sm" onClick={() => setTab("rag-effectiveness")}>
+                Efectividad RAG
+              </Button>
+            </div>
+          )}
+
+          {curduriaTabs.includes(tab) && (
+            <div className="flex flex-wrap gap-2 border-t border-white/10 pt-3">
+              <Button variant={tab === "lab" ? "default" : "outline"} size="sm" onClick={() => setTab("lab")}>
+                Lab
+              </Button>
+              <Button variant={tab === "curaduria" ? "default" : "outline"} size="sm" onClick={() => setTab("curaduria")}>
+                Curaduria
+              </Button>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {tab === "chains" && <AccountChainsPage account={account} />}
+
+      {tab === "semantic-aliases" && <SemanticAliasesEditor account={account} />}
+      {tab === "ignored-phrases" && <IgnoredPhrasesEditor account={account} />}
+      {tab === "name-noise" && <NameNoisePage account={account} />}
+      {tab === "enrichment-tokens" && <EnrichmentTokensEditor account={account} />}
+      {tab === "variants" && <PromotionVariantsEditor account={account} />}
+      {tab === "markers" && <CategoryMarkersEditor account={account} />}
+      {tab === "measure-noise-chains" && <MeasureNoiseChainsEditor account={account} />}
+
+      {tab === "semantic-config" && <SemanticConfigPage account={account} />}
+      {tab === "size-rules" && <SizeRulesPage account={account} />}
+      {tab === "rag-effectiveness" && <RagEffectivenessPage account={account} />}
+
+      {tab === "lab" && <AccountSemanticLabPage account={account} />}
+      {tab === "curaduria" && <AccountSemanticReviewPage account={account} />}
+    </div>
+  );
+}

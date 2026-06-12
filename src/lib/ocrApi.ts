@@ -119,6 +119,10 @@ import type {
   AccountIgnoredPhrasePatchRequest,
   AccountIgnoredPhrase,
   AccountIgnoredPhrasesResponse,
+  MeasureNoiseChain,
+  MeasureNoiseChainsResponse,
+  MeasureNoiseChainUpsertRequest,
+  MeasureNoiseChainPatchRequest,
   IgnoredPhraseSuggestion,
   IgnoredPhraseSuggestionExample,
   IgnoredPhraseSuggestionsResponse,
@@ -1776,6 +1780,110 @@ export const ocrApi = {
       `/v1/accounts/${encodeURIComponent(accountName)}/ignored-phrases/${encodeURIComponent(String(ignoredId))}`,
       { method: "DELETE" },
       "No se pudo eliminar frase ignorada",
+    );
+    return (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
+  },
+
+  listMeasureNoiseChains: async (
+    accountName: string,
+    options?: { includeInactive?: boolean },
+  ): Promise<MeasureNoiseChainsResponse> => {
+    const includeInactive = options?.includeInactive ?? true;
+    const q = `?include_inactive=${includeInactive ? "true" : "false"}`;
+    const body = await request(
+      `/v1/accounts/${encodeURIComponent(accountName)}/measure-noise-chains${q}`,
+      { method: "GET" },
+      "No se pudo consultar cadenas de ruido de medidas",
+    );
+    const data = (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
+    const rows = Array.isArray(data.measure_noise_chains) ? data.measure_noise_chains : [];
+    const chains: MeasureNoiseChain[] = [];
+    for (const row of rows) {
+      const x = (row && typeof row === "object" ? row : {}) as Record<string, unknown>;
+      const chainCode = typeof x.chain_code === "string" ? x.chain_code.trim() : "";
+      if (!chainCode) continue;
+      chains.push({
+        id: typeof x.id === "number" ? x.id : Number(x.id ?? -1),
+        chain_code: chainCode,
+        is_active:
+          typeof x.is_active === "number" || typeof x.is_active === "boolean"
+            ? (x.is_active as number | boolean)
+            : 1,
+        notes: typeof x.notes === "string" ? x.notes : undefined,
+        created_at: typeof x.created_at === "string" ? x.created_at : undefined,
+        updated_at: typeof x.updated_at === "string" ? x.updated_at : undefined,
+      });
+    }
+    return {
+      account_name: typeof data.account_name === "string" ? data.account_name : accountName,
+      measure_noise_chains: chains,
+    };
+  },
+
+  upsertMeasureNoiseChain: async (
+    accountName: string,
+    payload: MeasureNoiseChainUpsertRequest,
+  ): Promise<MeasureNoiseChain> => {
+    const body = await request(
+      `/v1/accounts/${encodeURIComponent(accountName)}/measure-noise-chains`,
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) },
+      "No se pudo guardar cadena de ruido de medidas",
+    );
+    const data = (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
+    const row =
+      data.measure_noise_chain && typeof data.measure_noise_chain === "object"
+        ? (data.measure_noise_chain as Record<string, unknown>)
+        : data;
+    return {
+      id: typeof row.id === "number" ? row.id : Number(row.id ?? -1),
+      chain_code: typeof row.chain_code === "string" ? row.chain_code : payload.chain_code,
+      is_active:
+        typeof row.is_active === "number" || typeof row.is_active === "boolean"
+          ? (row.is_active as number | boolean)
+          : payload.is_active !== false
+            ? 1
+            : 0,
+      notes: typeof row.notes === "string" ? row.notes : payload.notes,
+      created_at: typeof row.created_at === "string" ? row.created_at : undefined,
+      updated_at: typeof row.updated_at === "string" ? row.updated_at : undefined,
+    };
+  },
+
+  patchMeasureNoiseChain: async (
+    accountName: string,
+    chainCode: string,
+    payload: MeasureNoiseChainPatchRequest,
+  ): Promise<MeasureNoiseChain> => {
+    const body = await request(
+      `/v1/accounts/${encodeURIComponent(accountName)}/measure-noise-chains/${encodeURIComponent(chainCode)}`,
+      { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) },
+      "No se pudo actualizar cadena de ruido de medidas",
+    );
+    const data = (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
+    const row =
+      data.measure_noise_chain && typeof data.measure_noise_chain === "object"
+        ? (data.measure_noise_chain as Record<string, unknown>)
+        : data;
+    return {
+      id: typeof row.id === "number" ? row.id : Number(row.id ?? -1),
+      chain_code: typeof row.chain_code === "string" ? row.chain_code : chainCode,
+      is_active:
+        typeof row.is_active === "number" || typeof row.is_active === "boolean"
+          ? (row.is_active as number | boolean)
+          : payload.is_active !== false
+            ? 1
+            : 0,
+      notes: typeof row.notes === "string" ? row.notes : payload.notes,
+      created_at: typeof row.created_at === "string" ? row.created_at : undefined,
+      updated_at: typeof row.updated_at === "string" ? row.updated_at : undefined,
+    };
+  },
+
+  deleteMeasureNoiseChain: async (accountName: string, chainCode: string): Promise<Record<string, unknown>> => {
+    const body = await request(
+      `/v1/accounts/${encodeURIComponent(accountName)}/measure-noise-chains/${encodeURIComponent(chainCode)}`,
+      { method: "DELETE" },
+      "No se pudo eliminar cadena de ruido de medidas",
     );
     return (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
   },
