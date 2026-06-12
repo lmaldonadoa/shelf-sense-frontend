@@ -1,5 +1,6 @@
 ﻿import { z } from "zod";
 import { parsePromotionCardinality } from "@/lib/promotion-cardinality";
+import { buildCreateShelfJobBody } from "@/lib/shelf-job-payload";
 import type {
   ActiveConfigResponse,
   AliasListResponse,
@@ -144,6 +145,7 @@ import type {
   CreateShelfJobRequest,
   CreateShelfJobResponse,
   ShelfJobResultsResponse,
+  ShelfJobRerunRequest,
   ShelfJobRerunResponse,
   ShelfAsset,
   ShelfCropDecisionResponse,
@@ -3830,7 +3832,7 @@ export const ocrApi = {
   createShelfJob: async (payload: CreateShelfJobRequest): Promise<CreateShelfJobResponse> => {
     const body = await request(
       `/v1/shelf/jobs`,
-      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) },
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(buildCreateShelfJobBody(payload)) },
       "No se pudo crear job Shelf",
     );
     const data = (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
@@ -3875,7 +3877,7 @@ export const ocrApi = {
     };
   },
 
-  rerunShelfJob: async (jobId: string, payload: Record<string, unknown> = {}): Promise<ShelfJobRerunResponse> => {
+  rerunShelfJob: async (jobId: string, payload: ShelfJobRerunRequest = {}): Promise<ShelfJobRerunResponse> => {
     const body = await request(
       `/v1/shelf/jobs/${encodeURIComponent(jobId)}/rerun`,
       { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) },

@@ -34,6 +34,11 @@ import {
   ocrAssistDraftToPatchPayload,
   resolveAssistEngineUsedSnapshot,
 } from "@/lib/shelf-ocr-sku-assist";
+import {
+  buildShelfJobRerunOverrides,
+  normalizeShelfSubcategoria,
+  shelfJobEventsIncludeNoCategoriaHint,
+} from "@/lib/shelf-job-payload";
 import type { JobEvent, ShelfOcrSkuAssistConfigDraft } from "@/types/ocr-api";
 
 type Props = { account: string };
@@ -1571,11 +1576,21 @@ export function AccountShelfPage({ account }: Props) {
       const manualFileIds = imageFileIdsText.split("\n").map((x) => x.trim()).filter(Boolean);
       const fileIds = Array.from(new Set([...uploadedJobFileIds, ...manualFileIds]));
       const paths = imagePathsText.split("\n").map((x) => x.trim()).filter(Boolean);
+      const subcategoria = normalizeShelfSubcategoria(jobPayload.subcategoria);
+      if (!subcategoria) {
+        toast.warning("Sin subcategoría", {
+          description: "El reconocimiento no filtrará por categoría. El backend emitirá shelf.no_categoria_hint.",
+        });
+      }
       const payload: CreateShelfJobRequest = {
-        ...jobPayload,
         account_name: account,
+        config_name: jobPayload.config_name,
+        id_pdv: jobPayload.id_pdv,
+        processing_mode: jobPayload.processing_mode,
         image_file_ids: fileIds.length ? fileIds : undefined,
         image_paths: paths.length ? paths : undefined,
+        subcategoria,
+        usuario_relevo: String(jobPayload.usuario_relevo ?? "").trim() || undefined,
       };
       if (!payload.id_pdv.trim()) throw new Error("id_pdv es obligatorio.");
       if (!payload.image_file_ids?.length && !payload.image_paths?.length) {
@@ -1595,7 +1610,10 @@ export function AccountShelfPage({ account }: Props) {
     mutationFn: async (jobIdToRerun: string) => {
       const jobId = jobIdToRerun.trim();
       if (!jobId) throw new Error("No hay job_id para reejecutar.");
-      return ocrApi.rerunShelfJob(jobId, {});
+      const fromActiveJob = selectedJobId === jobId ? jobQuery.data?.subcategoria : undefined;
+      const fromRecent = (recentShelfJobsQuery.data ?? []).find((row) => row.job_id === jobId)?.subcategoria;
+      const subcategoria = normalizeShelfSubcategoria(fromActiveJob ?? fromRecent ?? jobPayload.subcategoria);
+      return ocrApi.rerunShelfJob(jobId, buildShelfJobRerunOverrides({ subcategoria }));
     },
     onSuccess: async (data) => {
       if (!data.new_job_id) throw new Error("Backend no devolvió new_job_id.");
@@ -1644,6 +1662,19 @@ export function AccountShelfPage({ account }: Props) {
     queryFn: () => ocrApi.getShelfJobEvents(selectedJobId),
     refetchInterval: 3000,
   });
+
+  const noCategoriaHintWarnedRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!selectedJobId) return;
+    const events = (eventsQuery.data ?? []) as JobEvent[];
+    if (!shelfJobEventsIncludeNoCategoriaHint(events)) return;
+    if (noCategoriaHintWarnedRef.current === selectedJobId) return;
+    noCategoriaHintWarnedRef.current = selectedJobId;
+    const event = events.find((row) => row.event_type === "shelf.no_categoria_hint");
+    toast.warning("Job sin categoría", {
+      description: event?.message ?? "El reconocimiento no filtró candidatos por subcategoría (shelf.no_categoria_hint).",
+    });
+  }, [eventsQuery.data, selectedJobId]);
 
   const metricsQuery = useQuery({
     queryKey: ["shelf-metrics", selectedJobId],
@@ -3881,7 +3912,19 @@ export function AccountShelfPage({ account }: Props) {
                         <option value="crop_extraction">crop_extraction</option>
                       </select>
                     </div>
-                    <div><Label>Subcategoría</Label><Input value={jobPayload.subcategoria ?? ""} onChange={(e) => setJobPayload((p) => ({ ...p, subcategoria: e.target.value }))} /></div>
+                    <div>
+                      <Label>Subcategoría</Label>
+                      <Input
+                        value={jobPayload.subcategoria ?? ""}
+                        onChange={(e) => setJobPayload((p) => ({ ...p, subcategoria: e.target.value }))}
+                        placeholder="LIMPIAPISOS"
+                      />
+                      {!normalizeShelfSubcategoria(jobPayload.subcategoria) ? (
+                        <p className="mt-1 text-[11px] text-amber-300/90">
+                          Recomendado: indica la subcategoría para filtrar candidatos del catálogo.
+                        </p>
+                      ) : null}
+                    </div>
                     <div><Label>Usuario relevo</Label><Input value={jobPayload.usuario_relevo ?? ""} onChange={(e) => setJobPayload((p) => ({ ...p, usuario_relevo: e.target.value }))} /></div>
                     <div className="sm:col-span-2"><Label>config_name</Label><Input value={jobPayload.config_name ?? ""} onChange={(e) => setJobPayload((p) => ({ ...p, config_name: e.target.value }))} /></div>
                   </div>

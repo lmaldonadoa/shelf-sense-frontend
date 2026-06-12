@@ -20,6 +20,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { getJobId, HttpError, isFinalJobStatus, ocrApi } from "@/lib/ocrApi";
+import { buildShelfJobRerunOverrides } from "@/lib/shelf-job-payload";
 import type { JobRow, JobStatus } from "@/types/ocr-api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -218,9 +219,9 @@ export function AccountJobsHistoryPage({ account }: AccountJobsHistoryPageProps)
   }, [rows]);
 
   const rerunMutation = useMutation({
-    mutationFn: async ({ jobId, module }: { jobId: string; module: string }) => {
+    mutationFn: async ({ jobId, module, subcategoria }: { jobId: string; module: string; subcategoria?: string | null }) => {
       if (module === "shelf_recognition") {
-        return ocrApi.rerunShelfJob(jobId, {});
+        return ocrApi.rerunShelfJob(jobId, buildShelfJobRerunOverrides({ subcategoria }));
       }
       return ocrApi.rerunPromotionsJob(accountFromParams, jobId, { mode: "new" });
     },
@@ -478,7 +479,7 @@ export function AccountJobsHistoryPage({ account }: AccountJobsHistoryPageProps)
                             size="sm"
                             variant="outline"
                             className="h-7 w-7 border-blue-500/30 p-0 text-blue-300 hover:bg-blue-500/10"
-                            onClick={() => rerunMutation.mutate({ jobId: safeJobId, module: typeMeta.detail })}
+                            onClick={() => rerunMutation.mutate({ jobId: safeJobId, module: typeMeta.detail, subcategoria: row.subcategoria })}
                             disabled={rerunMutation.isPending && rerunMutation.variables?.jobId === safeJobId}
                             title="Reejecutar"
                           >

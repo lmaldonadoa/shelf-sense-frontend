@@ -2101,8 +2101,20 @@ export type CreateShelfJobRequest = {
   image_file_ids?: string[];
   image_paths?: string[];
   processing_mode?: "recognition" | "crop_extraction" | string;
+  /** Alias de negocio — el backend lo promueve a categoria_hint si hace falta. */
   subcategoria?: string;
+  categoria_hint?: string;
   usuario_relevo?: string | null;
+};
+
+export type ShelfJobRerunRequest = {
+  config_name?: string;
+  processing_mode?: string;
+  categoria_hint?: string;
+  chain_hint?: string;
+  id_pdv?: string;
+  usuario_relevo?: string;
+  force_refresh_reports?: boolean;
 };
 
 export type ShelfExtractedCrop = {
